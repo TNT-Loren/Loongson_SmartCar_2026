@@ -1,0 +1,17 @@
+./user/main.cpp          # 主函数，初始化各模块，启动调度器
+./code/                  # 核心控制与通信代码
+├── scheduler.hpp/cpp    # 中央调度器，5ms 定时器 + 10ms 控制循环
+├── tcp.hpp/cpp          # TCP 通信模块，与上位机交互
+├── Control/             # 控制算法
+│   ├── Control_Header/  # 头文件
+│   │   ├── pid.hpp      # PID 控制器类声明
+│   │   ├── motor.hpp    # 电机驱动接口
+│   │   ├── imu.hpp      # IMU 数据处理类
+│   │   └── encoder.hpp  # 编码器读取接口
+│   └── Control_Source/  # 实现文件
+│       ├── pid.cpp      # 增量式/位置式 PID 实现
+│       ├── motor.cpp    # 电机驱动实现
+│       ├── imu.cpp      # YawTracker 实现，陀螺仪积分
+│       └── encoder.cpp  # 编码器速度计算
+./model/                 # 神经网络模型（未使用）
+    └── loong_cnn_model_simple.h
