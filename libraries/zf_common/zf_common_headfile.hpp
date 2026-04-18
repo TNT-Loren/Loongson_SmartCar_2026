@@ -100,6 +100,7 @@
 
 //===================================================用户自定义文件===================================================
 //#include "loong_cnn_model_simple.h"
+#include "main.hpp"
 #include "scheduler.hpp" //中央调度器
 
 //#include "key.hpp"
@@ -108,6 +109,7 @@
 #include "imu.hpp"
 #include "tcp.hpp"
 #include "pid.hpp"
+#include "image_test.hpp"
 
 //===================================================用户自定义文件===================================================
 

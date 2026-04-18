@@ -6,6 +6,9 @@
     速度是160的时候已经很快了0.72 0.16    0.6   0.2
     角度环：3.5 0.3    0.2
 */
+
+int test;
+
 //===================================================
 void cleanup();
 void sigint_handler(int signum);
@@ -15,11 +18,22 @@ int main(int, char **)
     imu_init();
     Encoder_Init();
     motor_init();
+    
     // if (tcp_debug_init("192.168.31.20", 8086))
     // {
+
     //     //tcp_bind_variables(&target_yaw, &yaw);
-    //    //  tcp_bind_variables(&speed1, &speed2);
+    //    // tcp_bind_variables(&speed1, &speed2);
     // }
+    if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
+    {
+        return -1;
+    }
+    if (uvc_dev.init(UVC_PATH) < 0)
+    {
+        std::cout << "  1 " << std::endl;
+        return -1; // 摄像头初始化失败，直接退出程序
+    }
 
     atexit(cleanup);
     signal(SIGINT, sigint_handler);
@@ -28,12 +42,18 @@ int main(int, char **)
     scheduler_init();
     while (1)
     {
+
+        image_test();
+
+        // motor_set_speed(0, 0);
         if (need_print.load() == 1)
         {
             need_print.store(0);
-            std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
+            //std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
+            // std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
+           // std::cout << "test " << test << std::endl;
         }
-        system_delay_ms(20);
+        system_delay_ms(10);
     }
 }
 //================================================================

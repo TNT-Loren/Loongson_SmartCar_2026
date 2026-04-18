@@ -32,6 +32,10 @@ include_directories(
     # 业务代码头文件
     ../user 
     ../code 
+    ../code/Control/Control_Header   # <--- 添加这一行，让编译器能直接找到 motor.hpp
+    ../code/Control/Control_Source  # <--- 添加这一行，让编译器能直接找到 motor.hpp
+    ../code/Control/Menu  # <--- 添加这一行，让编译器能直接找到 motor.hpp
+   # ../code/VSTAB_module/VSTAB_Header # <--- 如果你有其他新分类的头文件，也要加上
     ../model
     ../../libraries/zf_common 
     ../../libraries/zf_device 
@@ -60,9 +64,23 @@ link_directories(
     ../../libraries/zf_components/ncnn/lib
 )
 
+# # 业务源文件
+# aux_source_directory(../user DIR_SRCS)
+# aux_source_directory(../code DIR_SRCS)
+# aux_source_directory(../model DIR_SRCS)
+# aux_source_directory(../../libraries/zf_common DIR_SRCS)
+# aux_source_directory(../../libraries/zf_device DIR_SRCS)
+# aux_source_directory(../../libraries/zf_driver DIR_SRCS)
+# aux_source_directory(../../libraries/zf_components/seekfree_assistant DIR_SRCS)
+
+
+
 # 业务源文件
 aux_source_directory(../user DIR_SRCS)
 aux_source_directory(../code DIR_SRCS)
+aux_source_directory(../code/Control/Control_Source DIR_SRCS) # <--- 必须添加这一行
+aux_source_directory(../code/Control/Menu DIR_SRCS)           # <--- 如果Menu里有.cpp也加上
+aux_source_directory(../code/VSTAB_module/VSTAB_Soure DIR_SRCS) # <--- 如果需要红点识别功能也加上
 aux_source_directory(../model DIR_SRCS)
 aux_source_directory(../../libraries/zf_common DIR_SRCS)
 aux_source_directory(../../libraries/zf_device DIR_SRCS)

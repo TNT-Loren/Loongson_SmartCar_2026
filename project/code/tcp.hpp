@@ -5,6 +5,7 @@
 
 // 初始化
 bool tcp_debug_init(const char *ip, int port);
+bool tcp_image_transmission_init(const char *ip, int port);
 
 // 绑定需要监控的浮点数变量地址 (最多4路)
 void tcp_bind_variables(float *ch0_ptr, float *ch1_ptr = nullptr, float *ch2_ptr = nullptr, float *ch3_ptr = nullptr);

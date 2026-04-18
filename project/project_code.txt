@@ -1,16 +1,36 @@
 
 ==================================================
+FILE: ./test.c
+==================================================
+
+
+==================================================
+FILE: ./user/main.hpp
+==================================================
+
+#ifndef __main_HPP__
+#define __main_HPP__
+
+#include "zf_common_headfile.hpp"
+
+extern int test;
+
+#endif
+==================================================
 FILE: ./user/main.cpp
 ==================================================
 
 #include "zf_common_headfile.hpp"
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
-
+// 测试  3.25
 /*
     速度是160的时候已经很快了0.72 0.16    0.6   0.2
     角度环：3.5 0.3    0.2
 */
+
+int test;
+
 //===================================================
 void cleanup();
 void sigint_handler(int signum);
@@ -20,10 +40,21 @@ int main(int, char **)
     imu_init();
     Encoder_Init();
     motor_init();
-    if (tcp_debug_init("192.168.31.20", 8086))
+    
+    // if (tcp_debug_init("192.168.31.20", 8086))
+    // {
+
+    //     //tcp_bind_variables(&target_yaw, &yaw);
+    //    // tcp_bind_variables(&speed1, &speed2);
+    // }
+    if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
     {
-        tcp_bind_variables(&target_yaw, &yaw);
-       //  tcp_bind_variables(&speed1, &speed2);
+        return -1;
+    }
+    if (uvc_dev.init(UVC_PATH) < 0)
+    {
+        std::cout << "  1 " << std::endl;
+        return -1; // 摄像头初始化失败，直接退出程序
     }
 
     atexit(cleanup);
@@ -31,15 +62,20 @@ int main(int, char **)
 
     // 启动中央大脑！全车所有模块开始按时间片同步运转
     scheduler_init();
-    target_speed = 140;
     while (1)
     {
+
+        image_test();
+
+        // motor_set_speed(0, 0);
         if (need_print.load() == 1)
         {
             need_print.store(0);
-            std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
+            //std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
+            // std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
+           // std::cout << "test " << test << std::endl;
         }
-        system_delay_ms(20);
+        system_delay_ms(10);
     }
 }
 //================================================================
@@ -60,6 +96,288 @@ void cleanup()
     motor_stop();
 }
 
+
+
+==================================================
+FILE: ./code/image_test.cpp
+==================================================
+
+#include "image_test.hpp"
+#include "math.h"
+
+zf_device_uvc uvc_dev; // 定义UVC免驱摄像头设备对象，用于摄像头初始化/图像采集
+uint8 *rgay_image;     // 灰度图像数据指针，指向摄像头采集到的灰度图像缓冲区首地址
+
+uint8 image_copy[UVC_HEIGHT][UVC_WIDTH];
+
+// 灰度图像数据拷贝缓冲区，二维数组存储，大小与摄像头采集分辨率一致，用于中转图像数据
+uint8 bin_image[MT9V03X_H][MT9V03X_W]; // 二值化图像数组
+uint8 Left_Line[MT9V03X_H];            // 左边线数组
+uint8 Right_Line[MT9V03X_H];           // 右边线数组
+uint8 Mid_Line[MT9V03X_H];             // 中线数组
+
+uint8 Threshold = 0; // 二值化阈值，动态
+
+/**
+ * 计算整数的绝对值
+ *
+ * @param value 待处理的整数
+ * @return 整数的绝对值
+ */
+int my_abs(int value)
+{
+    // 如果输入值为非负数，则直接返回该值
+    if (value >= 0)
+        return value;
+    // 如果输入值为负数，则返回其相反数，即正数
+    else
+        return -value;
+}
+
+/**
+ * 限制输入值x在a和b之间
+ * 如果x小于a，则将x设置为a；如果x大于b，则将x设置为b
+ * 此函数的目的是确保x的值不会超出[a, b]的范围
+ *
+ * @param x 需要限制的值
+ * @param a 下限值
+ * @param b 上限值
+ * @return 限制后的x值
+ */
+int16 limit_a_b(int16 x, int a, int b)
+{
+    // 检查x是否小于下限a，如果是，则将x设置为a
+    if (x < a)
+        x = a;
+    // 检查x是否大于上限b，如果是，则将x设置为b
+    if (x > b)
+        x = b;
+    // 返回限制后的x值
+    return x;
+}
+
+/*-------------------------------------------------------------------------------------------------------------------
+  @brief     大津法求阈值
+  @param     image       图像数组
+             col         列
+             row         行
+  @return    threshold   返回int阈值数值
+  Sample     threshold=otsuThreshold(mt9v03x_image[0],MT9V03X_W, MT9V03X_H);
+  @note      no
+-------------------------------------------------------------------------------------------------------------------*/
+uint8 otsuThreshold(uint8 *image, uint16 col, uint16 row)
+{
+#define GrayScale 256
+    uint16 Image_Width = col;
+    uint16 Image_Height = row;
+    uint16 X;
+    uint16 Y;
+    uint8 *image_data = image;
+    int HistGram[GrayScale] = {0};
+
+    uint32 Amount = 0;
+    uint32 PixelBack = 0;
+    uint32 PixelIntegralBack = 0;
+    uint32 PixelIntegral = 0;
+    int32 PixelIntegralFore = 0;
+    int32 PixelFore = 0;
+    double OmegaBack = 0, OmegaFore = 0, MicroBack = 0, MicroFore = 0, SigmaB = 0, Sigma = 0; // 类间方差;
+    uint16 MinValue = 0, MaxValue = 0;
+    uint8 Threshold = 0;
+
+    for (Y = 0; Y < Image_Height; Y++) // Y<Image_Height改为Y =Image_Height；以便进行 行二值化
+    {
+        // Y=Image_Height;
+        for (X = 0; X < Image_Width; X++)
+        {
+            HistGram[(int)image_data[Y * Image_Width + X]]++; // 统计每个灰度值的个数信息
+        }
+    }
+
+    for (MinValue = 0; MinValue < 256 && HistGram[MinValue] == 0; MinValue++)
+        ; // 获取最小灰度的值
+    for (MaxValue = 255; MaxValue > MinValue && HistGram[MinValue] == 0; MaxValue--)
+        ; // 获取最大灰度的值
+
+    if (MaxValue == MinValue)
+    {
+        return MaxValue; // 图像中只有一个颜色
+    }
+    if (MinValue + 1 == MaxValue)
+    {
+        return MinValue; // 图像中只有二个颜色
+    }
+
+    for (Y = MinValue; Y <= MaxValue; Y++)
+    {
+        Amount += HistGram[Y]; //  像素总数
+    }
+
+    PixelIntegral = 0;
+    for (Y = MinValue; Y <= MaxValue; Y++)
+    {
+        PixelIntegral += HistGram[Y] * Y; // 灰度值总数
+    }
+    SigmaB = -1;
+    for (Y = MinValue; Y < MaxValue; Y++)
+    {
+        PixelBack = PixelBack + HistGram[Y];                                               // 前景像素点数
+        PixelFore = Amount - PixelBack;                                                    // 背景像素点数
+        OmegaBack = (double)PixelBack / Amount;                                            // 前景像素百分比
+        OmegaFore = (double)PixelFore / Amount;                                            // 背景像素百分比
+        PixelIntegralBack += HistGram[Y] * Y;                                              // 前景灰度值
+        PixelIntegralFore = PixelIntegral - PixelIntegralBack;                             // 背景灰度值
+        MicroBack = (double)PixelIntegralBack / PixelBack;                                 // 前景灰度百分比
+        MicroFore = (double)PixelIntegralFore / PixelFore;                                 // 背景灰度百分比
+        Sigma = OmegaBack * OmegaFore * (MicroBack - MicroFore) * (MicroBack - MicroFore); // g
+        if (Sigma > SigmaB)                                                                // 遍历最大的类间方差g
+        {
+            SigmaB = Sigma;
+            Threshold = (uint8)Y;
+        }
+    }
+    return Threshold;
+}
+
+/*-------------------------------------------------------------------------------------------------------------------
+  @brief     图像二值化处理函数
+  @return    二值化之后的图像数组
+  Sample     图像二值化
+  @note      二值化处理，0黑，255是白，
+-------------------------------------------------------------------------------------------------------------------*/
+void turn_to_bin(void)
+{
+    uint8 i, j;
+    //    Threshold = otsuThreshold(image_copy[0], MT9V03X_W, MT9V03X_H);
+
+    for (i = 0; i < MT9V03X_H; i++)
+    {
+        for (j = 0; j < MT9V03X_W; j++)
+        {
+            if (image_copy[i][j] > Threshold)
+                bin_image[i][j] = 255;
+            else
+                bin_image[i][j] = 0;
+        }
+    }
+}
+
+void image_filter(uint8 (*bin_image)[MT9V03X_W]) // 形态学滤波，简单来说就是膨胀和腐蚀的思想
+{
+    uint16 i, j;
+    uint32 num = 0;
+
+    for (i = 1; i < MT9V03X_H - 1; i++)
+    {
+        for (j = 1; j < (MT9V03X_W - 1); j++)
+        {
+            // 统计八个方向的像素值
+            num =
+                bin_image[i - 1][j - 1] + bin_image[i - 1][j] + bin_image[i - 1][j + 1] + bin_image[i][j - 1] + bin_image[i][j + 1] + bin_image[i + 1][j - 1] + bin_image[i + 1][j] + bin_image[i + 1][j + 1];
+
+            if (num >= threshold_max && bin_image[i][j] == 0)
+            {
+
+                bin_image[i][j] = 255; // 白  可以搞成宏定义，方便更改
+            }
+            if (num <= threshold_min && bin_image[i][j] == 255)
+            {
+
+                bin_image[i][j] = 0; // 黑
+            }
+        }
+    }
+}
+
+/**
+ * 在图像上绘制矩形框。
+ * 该函数通过将图像数组的边缘像素点设置为0，从而在图像上绘制一个矩形框。
+ *
+ * @param image 指向图像数组的指针，图像数组的类型为uint8，大小为MT9V03X_W。
+ *              图像数组由调用该函数的外部程序提供。
+ */
+void image_draw_rectan(uint8 (*image)[MT9V03X_W])
+{
+
+    // 初始化循环变量i为0。
+    uint8 i = 0;
+
+    // 清除图像数组的左侧和右侧边缘像素点。
+    for (i = 0; i < MT9V03X_H - 1; i++)
+    {
+        image[i][0] = 0;
+        image[i][1] = 0;
+        image[i][MT9V03X_W - 1] = 0;
+        image[i][MT9V03X_W - 2] = 0;
+    }
+
+    // 清除图像数组的顶部和底部边缘像素点。
+    for (i = 0; i < MT9V03X_W - 1; i++)
+    {
+        image[0][i] = 0;
+        image[1][i] = 0;
+        image[2][i] = 0;
+        image[3][i] = 0;
+        //    image[MT9V03X_H-1][i] = 0;
+    }
+}
+
+void image_test(void)
+{
+    // 阻塞式等待摄像头完成新一帧图像的采集刷新，返回<0表示采集失败/异常
+    if (uvc_dev.wait_image_refresh() < 0)
+    {
+        std::cout << " 摄像头采集异常，直接退出程序，防止卡死 " << std::endl;
+        exit(0); // 摄像头采集异常，直接退出程序，防止卡死
+    }
+
+    // 获取摄像头采集到的灰度图像数据指针
+    rgay_image = uvc_dev.get_gray_image_ptr();
+    memcpy(image_copy, rgay_image, UVC_WIDTH * UVC_HEIGHT * sizeof(uint8));
+
+    Threshold = otsuThreshold(image_copy[0], MT9V03X_W, MT9V03X_H); // 大津法计算阈值
+    
+    // test= Threshold;
+    turn_to_bin();                                                  // 图像二值化
+    image_filter(bin_image);                                        // 滤波
+    image_draw_rectan(bin_image);                                   // 画方
+
+    seekfree_assistant_camera_send();
+}
+
+==================================================
+FILE: ./code/image_test.hpp
+==================================================
+
+#ifndef __image_test_HPP__
+#define __image_test_HPP__
+
+#include "zf_common_headfile.hpp"
+
+extern zf_device_uvc uvc_dev; // 定义UVC免驱摄像头设备对象，用于摄像头初始化/图像采集
+
+
+#define MT9V03X_H UVC_HEIGHT
+#define MT9V03X_W UVC_WIDTH
+
+
+extern uint8 image_copy[UVC_HEIGHT][UVC_WIDTH];
+extern uint8 bin_image[MT9V03X_H][MT9V03X_W]; // 二值化图像数组
+
+// 定义膨胀和腐蚀的阈值区间
+#define threshold_max 255 * 5 // 此参数可根据自己的需求调节
+#define threshold_min 255 * 1 // 此参数可根据自己的需求调节
+
+#define IMG_BLACK 0   // 0x00黑色
+#define IMG_WHITE 255 // 0xff白色
+
+#define Border_Max UVC_WIDTH - 2 // 边界最大值
+#define Border_Min 1             // 边界最小值
+
+//=========================
+void image_test(void);
+
+#endif
 ==================================================
 FILE: ./code/tcp.hpp
 ==================================================
@@ -71,6 +389,7 @@ FILE: ./code/tcp.hpp
 
 // 初始化
 bool tcp_debug_init(const char *ip, int port);
+bool tcp_image_transmission_init(const char *ip, int port);
 
 // 绑定需要监控的浮点数变量地址 (最多4路)
 void tcp_bind_variables(float *ch0_ptr, float *ch1_ptr = nullptr, float *ch2_ptr = nullptr, float *ch3_ptr = nullptr);
@@ -93,11 +412,10 @@ FILE: ./code/scheduler.cpp
 #include <iostream>
 #include <chrono>
 #include <thread>
-#include <unistd.h> // 用于 usleep 和 nice
+#include <unistd.h>  // 用于 usleep 和 nice
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
-
-#define base_speed 0.0f
+#define base_speed 30.0f
 
 // 【全车唯一的主定时器】
 zf_driver_pit master_timer;
@@ -107,7 +425,7 @@ std::atomic<uint8_t> need_print(0);
 
 // 确保 last_time 和 tick_5ms 是 static 的，防止每次回调被重新初始化
 static uint32_t tick_5ms = 0;
-static auto last_time = std::chrono::high_resolution_clock::now();// 调度器专属的全局时间戳
+static auto last_time = std::chrono::high_resolution_clock::now(); // 调度器专属的全局时间戳
 static float dt_sum_10ms = 0.0f;
 
 //===================================下面设置为全局变量，为了方便 TCP 线程访问和调试
@@ -116,8 +434,8 @@ float target_yaw = 0.0f;
 float pwm_l = 0.0f;
 float pwm_r = 0.0f;
 
-//====================================================================================================================  
-  void master_scheduler_callback()
+//====================================================================================================================
+void master_scheduler_callback()
 {
     // ------------------ 1. 获取真实 dt ------------------
     auto now = std::chrono::high_resolution_clock::now();
@@ -144,8 +462,8 @@ float pwm_r = 0.0f;
 
     // ------------------ 4. 核心控制任务 (10ms) ------------------
     if (tick_5ms % 2 == 0)
-    {     
-       // 提取真实的控制周期并清零累加器
+    {
+        // 提取真实的控制周期并清零累加器
         float control_dt = dt_sum_10ms;
         dt_sum_10ms = 0.0f;
         // ==========================================================
@@ -156,19 +474,20 @@ float pwm_r = 0.0f;
         // float angle_ki = get_online_param(2);   // 滑块2：角度环 I
         // float angle_kd = get_online_param(3);   // 滑块3：角度环 D
 
-      //  pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
+        // pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
         // ==========================================================
         // 【第二阶段：运行中环 (角度环 - 位置式 PID)】
         // 目标：0度 (保持开机时的绝对直线)
         // 反馈：全车的真实 yaw 角
         // 输出：差速转向修正量 (steer)
         // ==========================================================
-        float steer = pid_angle.calc(target_yaw, yaw, control_dt);
-        // ==========================================================
-        // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
-        // ==========================================================
-        float target_speed_l = base_speed + steer;
-        float target_speed_r = base_speed - steer;
+             float steer = pid_angle.calc(target_yaw, yaw, control_dt);
+                    // // ==========================================================
+                    // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
+                    // ==========================================================
+                    float target_speed_l = base_speed + steer;
+                    float target_speed_r = base_speed - steer;
+
         //===============================================================速度环内环
         // /////////////////// 调速度环PID用
         // target_speed = get_online_param(0);
@@ -179,15 +498,14 @@ float pwm_r = 0.0f;
         // pid_right.set_pid(kp, ki, 0.0f);
         // 极度精准的闭环计算
         //============================================
-         pwm_l = pid_left.calc(target_speed_l, speed1, control_dt);
-         pwm_r = pid_right.calc(target_speed_r, speed2, control_dt);
-        // 优雅的软件限幅
+        pwm_l = pid_left.calc(target_speed_l, speed1, control_dt);
+        pwm_r = pid_right.calc(target_speed_r, speed2, control_dt);
+        // 软件限幅
         pwm_l = std::clamp(pwm_l, -50.0f, 50.0f);
         pwm_r = std::clamp(pwm_r, -50.0f, 50.0f);
         // 驱动电机
         motor_set_speed((int)pwm_l, (int)pwm_r);
         //================================================
-
     }
 
     // ------------------ 5. 低频心跳/打印任务 (1秒) ------------------
@@ -206,8 +524,8 @@ void tcp_background_thread()
     nice(19);
     while (true)
     {
-        tcp_update_task(); // 执行网络收发与调参读取
-        usleep(30000);     // 休眠约 30ms (33Hz)，足够看波形
+        // tcp_update_task(); // 执行网络收发与调参读取
+        usleep(30000); // 休眠约 30ms (33Hz)，足够看波形
     }
 }
 
@@ -218,8 +536,8 @@ void scheduler_init()
     last_time = std::chrono::high_resolution_clock::now();
     // 启动全车唯一的心脏，5ms 跳动一次
     master_timer.init_ms(5, master_scheduler_callback);
-   // printf("中央调度器已启动 (基准周期: 5ms)\n");
-   // 启动 TCP 后台线程并将其分离(detach)
+    // printf("中央调度器已启动 (基准周期: 5ms)\n");
+    // 启动 TCP 后台线程并将其分离(detach)
     std::thread comm_thread(tcp_background_thread);
     comm_thread.detach();
     printf("系统启动：5ms控制心脏 + 30ms异步通信线程 已就绪！\n");
@@ -288,6 +606,31 @@ bool tcp_debug_init(const char *ip, int port)
         printf("TCP Client Error. 检查 IP 或网络!\n");
         return false;
     }
+}
+
+/**
+ * @brief  图传初始化
+ * @param  ip   电脑 IP 地址
+ * @param  port 端口号 (通常是 8086)
+ * @return true 成功, false 失败
+ */
+bool tcp_image_transmission_init(const char *ip, int port)
+{
+    if (tcp_client_dev.init(ip, port) == 0)
+    {
+        printf("TCP Client OK. 成功连接逐飞助手!\n");
+        // 初始化逐飞助手的底层收发接口
+        seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], UVC_WIDTH, UVC_HEIGHT);
+
+        return true;
+    }
+    else
+    {
+        printf("TCP Client Error. 检查 IP 或网络!\n");
+        return false;
+    }
+
 }
 
 /**

@@ -35,6 +35,31 @@ bool tcp_debug_init(const char *ip, int port)
 }
 
 /**
+ * @brief  图传初始化
+ * @param  ip   电脑 IP 地址
+ * @param  port 端口号 (通常是 8086)
+ * @return true 成功, false 失败
+ */
+bool tcp_image_transmission_init(const char *ip, int port)
+{
+    if (tcp_client_dev.init(ip, port) == 0)
+    {
+        printf("TCP Client OK. 成功连接逐飞助手!\n");
+        // 初始化逐飞助手的底层收发接口
+        seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], UVC_WIDTH, UVC_HEIGHT);
+
+        return true;
+    }
+    else
+    {
+        printf("TCP Client Error. 检查 IP 或网络!\n");
+        return false;
+    }
+
+}
+
+/**
  * @brief  绑定要监控的变量地址 (原 tcp_start_oscilloscope_timer)
  * @note   调用此函数仅仅是“登记”变量，并不开启定时器，心跳由调度器控制
  */

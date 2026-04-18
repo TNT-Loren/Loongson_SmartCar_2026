@@ -28,7 +28,8 @@ void motor_init()
 // 
 void motor_set_speed(int duty_val_left, int duty_val_right)
 {
-    // 逻辑保持不变
+
+   // 逻辑保持不变
     if (duty_val_left >= 0)
     {
         drv8701e_dir_1.set_level(1);

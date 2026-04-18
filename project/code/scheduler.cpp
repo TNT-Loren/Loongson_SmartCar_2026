@@ -6,7 +6,7 @@
 #include <unistd.h>  // 用于 usleep 和 nice
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
-#define base_speed 0.0f
+#define base_speed 30.0f
 
 // 【全车唯一的主定时器】
 zf_driver_pit master_timer;
@@ -65,19 +65,20 @@ void master_scheduler_callback()
         // float angle_ki = get_online_param(2);   // 滑块2：角度环 I
         // float angle_kd = get_online_param(3);   // 滑块3：角度环 D
 
-        //  pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
+        // pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
         // ==========================================================
         // 【第二阶段：运行中环 (角度环 - 位置式 PID)】
         // 目标：0度 (保持开机时的绝对直线)
         // 反馈：全车的真实 yaw 角
         // 输出：差速转向修正量 (steer)
         // ==========================================================
-        float steer = pid_angle.calc(target_yaw, yaw, control_dt);
-        // ==========================================================
-        // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
-        // ==========================================================
-        float target_speed_l = base_speed + steer;
-        float target_speed_r = base_speed - steer;
+             float steer = pid_angle.calc(target_yaw, yaw, control_dt);
+                    // // ==========================================================
+                    // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
+                    // ==========================================================
+                    float target_speed_l = base_speed + steer;
+                    float target_speed_r = base_speed - steer;
+
         //===============================================================速度环内环
         // /////////////////// 调速度环PID用
         // target_speed = get_online_param(0);
@@ -90,7 +91,7 @@ void master_scheduler_callback()
         //============================================
         pwm_l = pid_left.calc(target_speed_l, speed1, control_dt);
         pwm_r = pid_right.calc(target_speed_r, speed2, control_dt);
-        // 优雅的软件限幅
+        // 软件限幅
         pwm_l = std::clamp(pwm_l, -50.0f, 50.0f);
         pwm_r = std::clamp(pwm_r, -50.0f, 50.0f);
         // 驱动电机
