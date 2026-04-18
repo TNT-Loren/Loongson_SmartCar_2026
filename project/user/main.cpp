@@ -34,6 +34,7 @@ int main(int, char **)
         std::cout << "  1 " << std::endl;
         return -1; // 摄像头初始化失败，直接退出程序
     }
+    
 
     atexit(cleanup);
     signal(SIGINT, sigint_handler);
