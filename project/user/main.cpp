@@ -7,7 +7,7 @@
     角度环：3.5 0.3    0.2
 */
 
-int test;
+//int test=80;
 
 //===================================================
 void cleanup();
@@ -41,6 +41,8 @@ int main(int, char **)
 
     // 启动中央大脑！全车所有模块开始按时间片同步运转
     scheduler_init();
+    uvc_dev.set_auto_exposure(1); // 关闭自动曝光，进入手动模式，才能设置曝光值
+    uvc_dev.set_exposure_value(100); // 设置初始曝光值
     while (1)
     {
 
@@ -49,10 +51,22 @@ int main(int, char **)
         // motor_set_speed(0, 0);
         if (need_print.load() == 1)
         {
+            // static int count = 0;
+            // if(++count==5)
+            // {
+            //     count = 0;
+            //     test += 20;
+            //    // uvc_dev.set_exposure_value(test); // 设置初始曝光值
+            //    std::cout << "test " << test << std::endl;
+            //     if(test > 300)
+            //     {
+            //         test = 80;
+            //     }
+                
             need_print.store(0);
             //std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
             // std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
-           // std::cout << "test " << test << std::endl;
+            
         }
         system_delay_ms(10);
     }
@@ -60,7 +74,6 @@ int main(int, char **)
 
 
 
-//
 //================================================================
 void sigint_handler(int signum)
 {
@@ -78,5 +91,4 @@ void cleanup()
     printf("程序异常退出，执行清理操作\n");
     motor_stop();
 }
-
 

@@ -110,7 +110,8 @@
 #include "tcp.hpp"
 #include "pid.hpp"
 #include "image_test.hpp"
-
+#include "image.hpp"
+#include "car_control.hpp"
 //===================================================用户自定义文件===================================================
 
 

@@ -68,7 +68,11 @@ void master_scheduler_callback()
         // pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
         // ==========================================================
         // 【第二阶段：运行中环 (角度环 - 位置式 PID)】
-        // 目标：0度 (保持开机时的绝对直线)
+        // 目标：最终的绝对 target_yaw
+        // 如果后面接入视觉循迹，建议在这里使用：
+        // target_yaw = wrap_to_180(yaw + vision_delta_yaw);
+        // 其中 vision_delta_yaw 由 image_test() 基于 mid_line 计算得到，
+        // 表示“相对当前车头，还需要补多少角度”，而不是直接把图像偏差当 target_yaw。
         // 反馈：全车的真实 yaw 角
         // 输出：差速转向修正量 (steer)
         // ==========================================================
@@ -115,11 +119,14 @@ void tcp_background_thread()
     nice(19);
     while (true)
     {
-        // tcp_update_task(); // 执行网络收发与调参读取
-        usleep(30000); // 休眠约 30ms (33Hz)，足够看波形
+       // tcp_update_task(); // 执行网络收发与调参读取
+        // 简单图传方案：主循环持续刷新 bin_image，这里只负责按固定频率发送当前图像。
+        // 这样改动最小，但发送时没有加锁，偶发情况下可能抓到一半更新中的图像。
+        // seekfree_assistant_camera_send();
+        usleep(20000); // 休眠约 30ms (33Hz)，足够看波形
     }
 }
-
+    
 // 调度器初始化
 void scheduler_init()
 {

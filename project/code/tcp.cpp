@@ -34,6 +34,8 @@ bool tcp_debug_init(const char *ip, int port)
     }
 }
 
+
+
 /**
  * @brief  图传初始化
  * @param  ip   电脑 IP 地址
@@ -47,7 +49,8 @@ bool tcp_image_transmission_init(const char *ip, int port)
         printf("TCP Client OK. 成功连接逐飞助手!\n");
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
-        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], UVC_WIDTH, UVC_HEIGHT);
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], UVC_WIDTH, UVC_HEIGHT);
+        seekfree_assistant_camera_boundary_config(X_BOUNDARY, UVC_HEIGHT, left_edge_line, mid_line, right_edge_line, NULL, NULL, NULL);
 
         return true;
     }
