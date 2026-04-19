@@ -6,7 +6,7 @@
 #include <unistd.h>  // 用于 usleep 和 nice
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
-#define base_speed 30.0f
+#define base_speed 0.0f
 
 // 【全车唯一的主定时器】
 zf_driver_pit master_timer;
@@ -76,12 +76,12 @@ void master_scheduler_callback()
         // 反馈：全车的真实 yaw 角
         // 输出：差速转向修正量 (steer)
         // ==========================================================
-             float steer = pid_angle.calc(target_yaw, yaw, control_dt);
-                    // // ==========================================================
-                    // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
-                    // ==========================================================
-                    float target_speed_l = base_speed + steer;
-                    float target_speed_r = base_speed - steer;
+        float steer = pid_angle.calc(vision_target_yaw, yaw, control_dt);
+        // // ==========================================================
+        // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
+        // ==========================================================
+        float target_speed_l = base_speed + steer;
+        float target_speed_r = base_speed - steer;
 
         //===============================================================速度环内环
         // /////////////////// 调速度环PID用

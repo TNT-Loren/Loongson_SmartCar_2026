@@ -95,7 +95,7 @@ float Cal_Weigth1(void)
 
     for (uint8 i = 1; i < 100; i++)
     {
-        Sum += end_mid_line[i] * Weigth1[i];
+        Sum += mid_line[i] * Weigth1[i];
         Weigth_Sum += Weigth1[i];
     }
 
@@ -136,7 +136,7 @@ float Cal_Weigth2(void)
 
     for (uint8 i = 1; i < 100; i++)
     {
-        Sum += end_mid_line[i] * Weigth2[i];
+        Sum += mid_line[i] * Weigth2[i];
         Weigth_Sum += Weigth2[i];
     }
 

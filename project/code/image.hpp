@@ -20,6 +20,8 @@ extern uint8 image_copy[UVC_HEIGHT][UVC_WIDTH];
 #define BREAKPOINT 20        // 断点阈值
 #define CIRCLESEARCHRANGE 20 // 圆搜索范围
 
+#define k_dev_to_yaw   20.0f // 假设满偏差对应 20 度，实际需要根据测试调整
+
 extern uint8 reference_col_line[SEARCH_H]; // 参考列绘制
 extern uint8 reference_point;              // 动态参考点 灰度值
 extern uint8 reference_rate;               // 动态对比度  差比和
@@ -31,11 +33,10 @@ extern uint8 remote_distance[SEARCH_W];    // 远近距离数组 记录每列的
 extern uint8 left_edge_line[SEARCH_H];     // 左边界线
 extern uint8 right_edge_line[SEARCH_H];    // 右边界线
 extern uint8 mid_line[SEARCH_H];    // 中线
-extern uint8 end_mid_line[SEARCH_H];    // 终点中线
 
+extern float vision_target_yaw; // 保存为“这帧图像给出的目标航向”
 
-
-extern uint32 if_count;                    // 计数器
+extern uint32 if_count; // 计数器
 
 typedef struct
 {

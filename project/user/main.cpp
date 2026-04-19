@@ -9,6 +9,35 @@
 
 //int test=80;
 
+/*
+
+这套的意义是：图像只在按帧更新，project/user/main.cpp:46；但 IMU 和控制环是定时跑的，project/code/scheduler.cpp:48。所以两帧图像之间，车还能继续靠
+  yaw 往目标角度收，不会完全受图像抖动摆布。
+
+  如果想比“只用 normalized_deviation”更稳，建议再加一个“中线斜率/预瞄方向误差”。因为横向偏差只知道“车偏了多少”，不知道“赛道本身朝哪边弯”。更好的视觉量
+  一般是：
+
+  int near_row = 95;   // 近处
+  int far_row  = 55;   // 远处
+
+  float center = UVC_WIDTH * 0.5f;
+  float x_near = mid_line[near_row];
+  float x_far  = mid_line[far_row];
+
+  float lateral_error = (x_near - center) / center;  // 横向偏差
+  float heading_error = atan2f(x_near - x_far,
+                               float(near_row - far_row)) * 57.29578f; // 赛道朝向，单位度
+
+  float vision_delta_yaw =
+        k_lat  * lateral_error
+      + k_head * heading_error;
+
+  float vision_target_yaw = wrap180(yaw + vision_delta_yaw);
+
+  这比单独用 normalized_deviation 更像“预瞄”，弯道不会那么晚打方向。
+*/
+
+float test;
 //===================================================
 void cleanup();
 void sigint_handler(int signum);
@@ -57,7 +86,7 @@ int main(int, char **)
             //     count = 0;
             //     test += 20;
             //    // uvc_dev.set_exposure_value(test); // 设置初始曝光值
-            //    std::cout << "test " << test << std::endl;
+            //    
             //     if(test > 300)
             //     {
             //         test = 80;
@@ -66,7 +95,7 @@ int main(int, char **)
             need_print.store(0);
             //std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
             // std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
-            
+            std::cout << "test " << test << std::endl;
         }
         system_delay_ms(10);
     }

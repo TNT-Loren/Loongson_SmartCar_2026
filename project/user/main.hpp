@@ -3,6 +3,6 @@
 
 #include "zf_common_headfile.hpp"
 
-extern int test;
+extern float test;
 
 #endif
