@@ -96,19 +96,27 @@ void PositionalPID::clear()
     integral = 0.0f; // 清空积分池
 }
 
+static float wrap180f(float a)
+{
+    while (a > 180.0f)
+        a -= 360.0f;
+    while (a <= -180.0f)
+        a += 360.0f;
+    return a;
+}
 
 float PositionalPID::calc(float target, float current, float dt)
 {
-    float error = target - current;
-
-    // 很好的死区处理：进入死区就直接输出 0，并且刷新 last_error 防止微分暴走
-    if (std::abs(error) < deadband)
-    {
-        // 必须刷新 last_error，防止冲出死区时微分项（D）暴走
-        last_error = error;
-        // 角度环进入死区，意味着车身已正，必须输出 0 差速让其直行
-        return 0.0f;
-    }
+   // float error = target - current;
+   float error = wrap180f(target - current);
+   // 很好的死区处理：进入死区就直接输出 0，并且刷新 last_error 防止微分暴走
+   if (std::abs(error) < deadband)
+   {
+       // 必须刷新 last_error，防止冲出死区时微分项（D）暴走
+       last_error = error;
+       // 角度环进入死区，意味着车身已正，必须输出 0 差速让其直行
+       return 0.0f;
+   }
 
     integral += (error * dt);
     integral = std::clamp(integral, -integral_limit, integral_limit);

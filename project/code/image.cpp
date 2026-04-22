@@ -1,4 +1,5 @@
 #include "image.hpp"
+#include <math.h>
 
 zf_device_uvc uvc_dev; // 定义UVC免驱摄像头设备对象，用于摄像头初始化/图像采集
 uint8 *rgay_image;     // 灰度图像数据指针，指向摄像头采集到的灰度图像缓冲区首地址
@@ -39,6 +40,43 @@ static int16 limit_ab(int16 value, int16 min, int16 max)
         value = min;
     }
     return value;
+}
+
+static float map_dev_to_angle(float deviation)
+{
+    float x = fabsf(deviation);
+    float y = 0.0f;
+
+    if (x <= 0.03f)
+    {
+        y = 0.0f;
+    }
+    else if (x <= 0.125f)
+    {
+        float t = (x - 0.03f) / 0.095f;
+        y = 5.0f * t * t;
+    }
+    else if (x <= 0.3f)
+    {
+        float u = (x - 0.125f) / 0.175f;
+        y = 5.0f + 10.0f * (u * u * (3.0f - 2.0f * u));
+    }
+    else if (x <= 0.35f)
+    {
+        float v = (x - 0.3f) / 0.05f;
+        y = 15.0f + 30.0f * (v * v * (3.0f - 2.0f * v));
+    }
+    else if (x <= 0.6f)
+    {
+        float w = (x - 0.35f) / 0.25f;
+        y = 45.0f + 30.0f * (w * w * (3.0f - 2.0f * w));
+    }
+    else
+    {
+        y = 75.0f;
+    }
+
+    return copysignf(y, deviation);
 }
 
 // 寻找数组中的最大值或最小值
@@ -512,12 +550,39 @@ void image_test(void)
     fit_midline();      // 中线拟合
     HDPJ_lvbo();        // 滑动平均滤波
 
+
+    // float deviation = 0.7f * e_near + 0.3f * e_far;
+    
+    float deviation = 0;
+    // if (key_mode == 0)
+    // {
+    //      deviation = Cal_Weigth1(); // [-1, 1]
+    //      vision_delta_yaw = k_dev_to_yaw * deviation; // 例如“满偏差对应 10~20 度”
+    // }
+    // else if(key_mode==1)
+    // {
+    //     deviation = Cal_Weigth2(); // [-1, 1]
+    //     vision_delta_yaw = k_dev_to_yaw * deviation; // 例如“满偏差对应 10~20 度”
+    // }
+    // else
+    // {
+    //     float e_near = Cal_Weigth1();
+    //     float e_far = Cal_Weigth2();
+    //     deviation = 0.7f * e_near + 0.3f * e_far;
+    // }
+
+    float e_near = Cal_Weigth1();
+    float e_far = Cal_Weigth2();
+    deviation = 0.7f * e_near + 0.3f * e_far;
+    float vision_delta_yaw = map_dev_to_angle(deviation);
+    test = deviation;
+    
     // 图像线程里，每来一帧更新一次
-    float deviation = Cal_Weigth1();                   // [-1, 1]
-    float vision_delta_yaw = k_dev_to_yaw * deviation; // 例如“满偏差对应 10~20 度”
+    // float deviation = Cal_Weigth1();                   // [-1, 1]
+     //float vision_delta_yaw = k_dev_to_yaw * deviation; // 例如“满偏差对应 10~20 度”
     // 保存为“这帧图像给出的目标航向”
     vision_target_yaw = wrap180(yaw + vision_delta_yaw);
-    test = vision_target_yaw; // 供调试观察用，后续可以删除
+    // test = vision_target_yaw; // 供调试观察用，后续可以删除
 
 
     // 这里适合继续做“视觉层”的计算，例如根据 mid_line 计算横向误差、预瞄方向误差，
@@ -527,9 +592,5 @@ void image_test(void)
 
     // 原来在主循环里直接发图，保留旧写法供后续对比。
     // 现在改为由 tcp_background_thread() 统一发送，避免图像处理线程直接占用 TCP 发送时间。
-    seekfree_assistant_camera_send();
+    //seekfree_assistant_camera_send();
 }
-
-
-
-

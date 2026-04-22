@@ -20,8 +20,6 @@ extern uint8 image_copy[UVC_HEIGHT][UVC_WIDTH];
 #define BREAKPOINT 20        // 断点阈值
 #define CIRCLESEARCHRANGE 20 // 圆搜索范围
 
-#define k_dev_to_yaw   20.0f // 假设满偏差对应 20 度，实际需要根据测试调整
-
 extern uint8 reference_col_line[SEARCH_H]; // 参考列绘制
 extern uint8 reference_point;              // 动态参考点 灰度值
 extern uint8 reference_rate;               // 动态对比度  差比和

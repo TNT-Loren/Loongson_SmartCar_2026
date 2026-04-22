@@ -6,7 +6,7 @@
 #include <unistd.h>  // 用于 usleep 和 nice
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
-#define base_speed 0.0f
+#define base_speed 120.0f
 
 // 【全车唯一的主定时器】
 zf_driver_pit master_timer;
@@ -77,11 +77,16 @@ void master_scheduler_callback()
         // 输出：差速转向修正量 (steer)
         // ==========================================================
         float steer = pid_angle.calc(vision_target_yaw, yaw, control_dt);
+        steer = std::clamp(steer, -base_speed, base_speed);// 软件限幅，防止转向过猛
         // // ==========================================================
         // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
         // ==========================================================
         float target_speed_l = base_speed + steer;
         float target_speed_r = base_speed - steer;
+
+        // 绝对速度不能为负，底盘不支持倒车
+        target_speed_l = std::max(0.0f, target_speed_l);
+        target_speed_r = std::max(0.0f, target_speed_r);
 
         //===============================================================速度环内环
         // /////////////////// 调速度环PID用
@@ -122,7 +127,7 @@ void tcp_background_thread()
        // tcp_update_task(); // 执行网络收发与调参读取
         // 简单图传方案：主循环持续刷新 bin_image，这里只负责按固定频率发送当前图像。
         // 这样改动最小，但发送时没有加锁，偶发情况下可能抓到一半更新中的图像。
-        // seekfree_assistant_camera_send();
+        seekfree_assistant_camera_send();
         usleep(20000); // 休眠约 30ms (33Hz)，足够看波形
     }
 }

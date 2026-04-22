@@ -4,5 +4,6 @@
 #include "zf_common_headfile.hpp"
 
 extern float test;
+extern int key_mode;
 
 #endif
