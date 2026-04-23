@@ -15,3 +15,91 @@
 │       └── encoder.cpp  # 编码器速度计算
 ./model/                 # 神经网络模型（未使用）
     └── loong_cnn_model_simple.h
+
+
+图像坐标与关键数组说明
+--------------------------------------------------
+1. image_copy 的坐标定义
+
+image_copy[row][col]
+
+- row = 0                -> 图像最上面一行，表示更远处
+- row = UVC_HEIGHT - 1   -> 图像最下面一行，表示更近处
+- col = 0                -> 图像最左侧
+- col = UVC_WIDTH - 1    -> 图像最右侧
+
+所以：
+- image_copy[0][0] 是左上角
+- image_copy[0][UVC_WIDTH - 1] 是右上角
+- image_copy[UVC_HEIGHT - 1][0] 是左下角
+- image_copy[UVC_HEIGHT - 1][UVC_WIDTH - 1] 是右下角
+
+
+2. 边线数组和中线数组的含义
+
+left_edge_line[row]
+- 表示第 row 行的左边线列坐标
+
+right_edge_line[row]
+- 表示第 row 行的右边线列坐标
+
+mid_line[row]
+- 表示第 row 行的中线列坐标
+
+注意：
+- 这些数组的下标就是图像行号，不是倒着存的
+- right_edge_line[0] 对应图像最上面一行
+- right_edge_line[UVC_HEIGHT - 1] 对应图像最下面一行
+
+虽然 search_line() 是从下往上搜线，但搜到的结果仍然存进对应的 row 下标里。
+
+
+3. 文字示意图
+
+                远处
+    row = 0    --------------------------------  最上面
+                |                              |
+                |   left_edge_line[0]          |
+                |             mid_line[0]      |
+                |                    right_edge_line[0]
+                |                              |
+                |            ...               |
+                |                              |
+                |   left_edge_line[60]         |
+                |             mid_line[60]     |
+                |                    right_edge_line[60]
+                |                              |
+    row = 119  --------------------------------  最下面
+                近处
+
+
+4. Weigth1 和 Weigth2 用的是哪一部分图像
+
+Cal_Weigth1()
+- 实际使用的是 mid_line[i]，不是直接使用原始 image_copy
+- i 从 1 到 99 遍历
+- 但真正起作用的是 Weigth1[i] 不为 0 的那些行
+- 当前这组权重主要集中在较靠下区域，大致是 row 46 到 row 99
+- 所以 Weigth1 更偏近处
+
+Cal_Weigth2()
+- 实际使用的也是 mid_line[i]
+- i 从 1 到 99 遍历
+- 当前这组权重主要集中在更靠上的区域，大致是 row 26 到 row 89
+- 所以 Weigth2 更偏远处
+
+
+5. 可以这样直接记
+
+- row 越小 -> 越靠上 -> 越远
+- row 越大 -> 越靠下 -> 越近
+- left_edge_line[row] / right_edge_line[row] / mid_line[row]
+  都表示“第 row 行”的横向位置
+- Weigth1 偏近端
+- Weigth2 偏远端
+
+
+6. 补充
+
+get_reference_point() 取的是图像底部 REFERENCEROW=5 行、中间 8 列区域来算参考灰度，
+因此这个阈值参考区域本身也是偏近处的。

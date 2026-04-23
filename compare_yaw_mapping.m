@@ -10,12 +10,12 @@ k_dev_to_yaw = 20.0;
 y_linear = k_dev_to_yaw * x;
 
 % Piecewise turn mapping copied from map_dev_to_angle().
-yaw_limit = 75.0;
+yaw_limit = 55.0;
 y_piecewise = arrayfun(@map_dev_to_angle, x);
 u_detail = linspace(0.0, 1.0, 1000);
 yaw_detail = arrayfun(@map_dev_to_angle, u_detail);
-u_knots = [0.00, 0.03, 0.125, 0.30, 0.35, 0.60, 1.00];
-yaw_knots = [0.0, 0.0, 5.0, 15.0, 45.0, 75.0, 75.0];
+u_knots = [0.00, 0.03, 0.125, 0.30, 0.35, 0.40, 0.50, 0.60, 1.00];
+yaw_knots = [0.0, 0.0, 5.0, 15.0, 25.0, 30.0, 45.0, 55.0, 55.0];
 
 figure('Color', 'w', 'Name', 'Yaw Mapping Compare');
 plot(x, y_linear, 'LineWidth', 2.5, 'Color', [0.85, 0.33, 0.10]);
@@ -62,16 +62,26 @@ function angle = map_dev_to_angle(deviation)
         y = 5.0 * t * t;
     elseif x <= 0.3
         u = (x - 0.125) / 0.175;
-        y = 5.0 + 10.0 * (u * u * (3.0 - 2.0 * u));
+        y = 5.0 + 10.0 * smoothstep(u);
     elseif x <= 0.35
         v = (x - 0.3) / 0.05;
-        y = 15.0 + 30.0 * (v * v * (3.0 - 2.0 * v));
+        y = 15.0 + 10.0 * smoothstep(v);
+    elseif x <= 0.4
+        w = (x - 0.35) / 0.05;
+        y = 25.0 + 5.0 * smoothstep(w);
+    elseif x <= 0.5
+        q = (x - 0.4) / 0.1;
+        y = 30.0 + 15.0 * smoothstep(q);
     elseif x <= 0.6
-        w = (x - 0.35) / 0.25;
-        y = 45.0 + 30.0 * (w * w * (3.0 - 2.0 * w));
+        r = (x - 0.5) / 0.1;
+        y = 45.0 + 10.0 * smoothstep(r);
     else
-        y = 75.0;
+        y = 55.0;
     end
 
     angle = sign(deviation) * y;
+end
+
+function y = smoothstep(t)
+    y = t .* t .* (3.0 - 2.0 .* t);
 end

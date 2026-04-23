@@ -6,7 +6,10 @@
 #include <unistd.h>  // 用于 usleep 和 nice
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
-#define base_speed 120.0f
+extern TrackInfo g_track_info;
+
+
+//#define base_speed 120.0f
 
 // 【全车唯一的主定时器】
 zf_driver_pit master_timer;
@@ -77,6 +80,7 @@ void master_scheduler_callback()
         // 输出：差速转向修正量 (steer)
         // ==========================================================
         float steer = pid_angle.calc(vision_target_yaw, yaw, control_dt);
+        float base_speed = calc_base_speed(g_track_info);
         steer = std::clamp(steer, -base_speed, base_speed);// 软件限幅，防止转向过猛
         // // ==========================================================
         // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】

@@ -11,7 +11,7 @@
 #define PWM_2_PATH ZF_PWM_MOTOR_2
 #define DIR_2_PATH ZF_GPIO_MOTOR_2
 
-#define MOTOR_MAX_DUTY_PERCENT (30) // 限制最大占空比为 30%，保护电机
+#define MOTOR_MAX_DUTY_PERCENT (40) // 限制最大占空比为 40%，保护电机
 
 // =================================================================================
 // 外部全局变量声明 (供 PID 和 调度器使用)

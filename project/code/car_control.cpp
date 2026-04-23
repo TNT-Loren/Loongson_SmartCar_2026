@@ -3,7 +3,8 @@
 
 float Sum = 0;
 uint16_t Weigth_Sum = 0;
-uint8_t midline_fff, midline_ff, midline_f;
+uint8_t midline1_fff, midline1_ff, midline1_f;
+uint8_t midline2_fff, midline2_ff, midline2_f;
 
 // 一：梯度限制、五点滑动平均滤波器来滤波中线
 void fit_midline(void) // 拟和中线，并进行滤波
@@ -68,11 +69,11 @@ const uint8 Weigth1[120] =//更近一点
     0, 0, 0, 0, 0, 0, 2, 2, 2, 2,
     2, 4, 4, 4, 4, 4, 5, 5, 5, 5,
     5, 5, 5, 6, 6, 6, 6, 6, 6, 8,
-     9, 9, 9, 10, 10, 10, 10, 10, 10, 10,
+    9, 9, 9, 10, 10, 10, 10, 10, 10, 10,
     10, 9, 9, 9, 9, 8, 8, 7, 7, 7,
-     6, 7, 7, 7, 6, 6, 6, 6, 6, 5,
+    6, 7, 7, 7, 6, 6, 6, 6, 6, 5,
     5, 5, 5, 5, 4, 4, 3, 3, 3, 3,
-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
 
@@ -115,10 +116,10 @@ float Cal_Weigth1(void)
     }
 
     // 滤波处理
-    midline_fff = midline_ff;
-    midline_ff = midline_f;
-    midline_f = Mid_Error;
-    Mid_Error = midline_fff * 0.20f + midline_ff * 0.50f + midline_f * 0.30f;
+    midline1_fff = midline1_ff;
+    midline1_ff = midline1_f;
+    midline1_f = Mid_Error;
+    Mid_Error = midline1_fff * 0.20f + midline1_ff * 0.50f + midline1_f * 0.30f;
 
     // 归一化到 [-1, 1] 范围
     float normalized_deviation = (Mid_Error - (UVC_WIDTH / 2.0f)) / (UVC_WIDTH / 2.0f);
@@ -156,10 +157,10 @@ float Cal_Weigth2(void)
     }
 
     // 滤波处理
-    midline_fff = midline_ff;
-    midline_ff = midline_f;
-    midline_f = Mid_Error;
-    Mid_Error = midline_fff * 0.20f + midline_ff * 0.50f + midline_f * 0.30f;
+    midline2_fff = midline2_ff;
+    midline2_ff = midline2_f;
+    midline2_f = Mid_Error;
+    Mid_Error = midline2_fff * 0.20f + midline2_ff * 0.50f + midline2_f * 0.30f;
 
     //  归一化到 [-1, 1] 范围
     float normalized_deviation = (Mid_Error - (UVC_WIDTH / 2.0f)) / (UVC_WIDTH / 2.0f);

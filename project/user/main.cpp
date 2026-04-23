@@ -24,7 +24,7 @@ void keyboard_poll_simple();
 //int test=80;
 
 
-float test;
+float test1, test2, test3;
 int key_mode = 0; 
 //===================================================
 void cleanup();
@@ -32,10 +32,12 @@ void sigint_handler(int signum);
 
 int main(int, char **)
 {
+    esc_init();
+    esc_set_speed_percent(0);
     imu_init();
     Encoder_Init();
     motor_init();
-
+    
     
     // if (tcp_debug_init("192.168.31.20", 8086))
     // {
@@ -66,7 +68,7 @@ int main(int, char **)
     {
 
         keyboard_poll_simple();// 轮询键盘输入，供调试用
-
+        esc_set_speed_percent(test1);
         image_test();
 
         // motor_set_speed(0, 0);
@@ -77,7 +79,7 @@ int main(int, char **)
             {
                 count = 0;
             }
-            std::cout << "test: " << test  <<std::endl;
+            std::cout << "test1: " << test1 <<"test2: "<<test2<<"test3: "<<test3<<std::endl;
             need_print.store(0);
             //std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
             // std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
@@ -144,8 +146,6 @@ void keyboard_init_simple()
 
 // 按键处理函数
 //     这个函数就是最核心的“简单按一个键做简单操作”：
-
-    
 void keyboard_poll_simple()
 {
     if (!g_keyboard_ready)
@@ -162,8 +162,8 @@ void keyboard_poll_simple()
         {
         case 'a':
         case 'A':
-            test += 1.0f;
-            std::cout << "test++ ： " << test << std::endl;
+            test1 += 10.0f;
+            std::cout << "test1: " << test1 << std::endl;
             break;
 
         case 'b':

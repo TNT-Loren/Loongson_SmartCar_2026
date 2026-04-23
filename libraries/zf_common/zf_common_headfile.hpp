@@ -112,6 +112,9 @@
 #include "image_test.hpp"
 #include "image.hpp"
 #include "car_control.hpp"
+#include "speed_strategy.hpp"
+#include "brushless.hpp"
+
 //===================================================用户自定义文件===================================================
 
 

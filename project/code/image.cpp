@@ -1,6 +1,8 @@
 #include "image.hpp"
 #include <math.h>
 
+TrackInfo g_track_info;// 全局赛道信息对象，供视觉模块填充，控制模块读取
+
 zf_device_uvc uvc_dev; // 定义UVC免驱摄像头设备对象，用于摄像头初始化/图像采集
 uint8 *rgay_image;     // 灰度图像数据指针，指向摄像头采集到的灰度图像缓冲区首地址
 
@@ -44,6 +46,11 @@ static int16 limit_ab(int16 value, int16 min, int16 max)
 
 static float map_dev_to_angle(float deviation)
 {
+    auto smoothstep = [](float t) -> float
+    {
+        return t * t * (3.0f - 2.0f * t);
+    };
+
     float x = fabsf(deviation);
     float y = 0.0f;
 
@@ -51,29 +58,40 @@ static float map_dev_to_angle(float deviation)
     {
         y = 0.0f;
     }
-    else if (x <= 0.125f)
+    // 1. 低处稍微提前且响应变大：0.1 达到 6 度 (原 0.125 达到 5 度)
+    else if (x <= 0.1f)
     {
-        float t = (x - 0.03f) / 0.095f;
-        y = 5.0f * t * t;
+        float t = (x - 0.03f) / 0.07f;
+        y = 6.0f * t * t; // 第一段用 t*t 保证从死区出来的连续性
     }
-    else if (x <= 0.3f)
+    // 2. 中低段过渡：0.25 达到 16 度
+    else if (x <= 0.25f)
     {
-        float u = (x - 0.125f) / 0.175f;
-        y = 5.0f + 10.0f * (u * u * (3.0f - 2.0f * u));
+        float t = (x - 0.1f) / 0.15f;
+        y = 6.0f + 10.0f * smoothstep(t);
     }
-    else if (x <= 0.35f)
+    // 3. 开始变得温和：0.4 达到 25 度 (原 30 度)
+    else if (x <= 0.4f)
     {
-        float v = (x - 0.3f) / 0.05f;
-        y = 15.0f + 30.0f * (v * v * (3.0f - 2.0f * v));
+        float t = (x - 0.25f) / 0.15f;
+        y = 16.0f + 9.0f * smoothstep(t);
     }
+    // 4. 高处进一步压低：0.5 达到 35 度 (原 45 度)
+    else if (x <= 0.5f)
+    {
+        float t = (x - 0.4f) / 0.1f;
+        y = 25.0f + 10.0f * smoothstep(t);
+    }
+    // 5. 尾段非常平缓：0.6 达到 45 度 (原 55 度)
     else if (x <= 0.6f)
     {
-        float w = (x - 0.35f) / 0.25f;
-        y = 45.0f + 30.0f * (w * w * (3.0f - 2.0f * w));
+        float t = (x - 0.5f) / 0.1f;
+        y = 35.0f + 10.0f * smoothstep(t);
     }
+    // 6. 最大限幅降低
     else
     {
-        y = 75.0f;
+        y = 55.0f;
     }
 
     return copysignf(y, deviation);
@@ -100,6 +118,7 @@ static uint8 find_max_min(uint8 *array, uint8 start, uint8 end, uint8 model)
                     value = temp;
                     temp2 = start - i;
                 }
+               
             }
         }
         else
@@ -519,7 +538,10 @@ static float wrap180(float a)
     return a;  
 }
 
+///==========================================================================================================================图像处理线程相关==========================================================================================================================
 float vision_target_yaw = 0.0f; // 保存为“这帧图像给出的目标航向”
+
+
 void image_test(void)
 {
     static uint8 lost_frame_count = 0;
@@ -549,11 +571,8 @@ void image_test(void)
 
     fit_midline();      // 中线拟合
     HDPJ_lvbo();        // 滑动平均滤波
-
-
-    // float deviation = 0.7f * e_near + 0.3f * e_far;
     
-    float deviation = 0;
+    // float deviation = 0;
     // if (key_mode == 0)
     // {
     //      deviation = Cal_Weigth1(); // [-1, 1]
@@ -573,15 +592,33 @@ void image_test(void)
 
     float e_near = Cal_Weigth1();
     float e_far = Cal_Weigth2();
-    deviation = 0.7f * e_near + 0.3f * e_far;
+    // 前馈预测偏差与曲率近似
+    float deviation = 0.1f * e_near + 0.9f * e_far;
     float vision_delta_yaw = map_dev_to_angle(deviation);
-    test = deviation;
-    
-    // 图像线程里，每来一帧更新一次
-    // float deviation = Cal_Weigth1();                   // [-1, 1]
-     //float vision_delta_yaw = k_dev_to_yaw * deviation; // 例如“满偏差对应 10~20 度”
-    // 保存为“这帧图像给出的目标航向”
+    // test = deviation;
+    float curvature = e_far - e_near;
+    // test1=curvature;
+    // test2 = e_near;
+    // test3 = e_far;
+
+    g_track_info.deviation = deviation;
+    g_track_info.curvature = curvature;
+
     vision_target_yaw = wrap180(yaw + vision_delta_yaw);
+
+    if (std::fabs(curvature) > 0.15f)
+    {
+        g_track_info.scene = TrackScene::SharpCurve;
+    }
+    else if (std::fabs(curvature) > 0.10f)
+    {
+        g_track_info.scene = TrackScene::GentleCurve;
+    }
+    else
+    {
+        g_track_info.scene = TrackScene::Straight;
+    }
+
     // test = vision_target_yaw; // 供调试观察用，后续可以删除
 
 
