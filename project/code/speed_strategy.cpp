@@ -5,19 +5,19 @@
 namespace
 {
     // 基础目标车速配置
-    constexpr float k_speed_straight = 110.0f;
-    constexpr float k_speed_curve = 90.0f;
-    constexpr float k_speed_sharp = 80.0f;
-    constexpr float k_speed_lost = 75.0f;
+    constexpr float k_speed_straight = 150.0f;
+    constexpr float k_speed_curve = 125.0f;
+    constexpr float k_speed_sharp = 110.0f;
+    constexpr float k_speed_lost = 90.0f;
 
     // 加减速步长限制（非对称平滑）
-    constexpr float k_speed_up_step = 2.0f;
-    constexpr float k_speed_down_step = 3.0f;
+    constexpr float k_speed_up_step = 3.0f;
+    constexpr float k_speed_down_step = 5.0f;
 }
 
 float calc_base_speed(const TrackInfo &info)
 {
-    static float base_speed = 100.0f; // 初始起步速度
+    static float base_speed = 140.0f; // 初始起步速度
 
     float target = k_speed_straight;
 
@@ -25,23 +25,23 @@ float calc_base_speed(const TrackInfo &info)
     if (info.scene == TrackScene::LostLine)
     {
         target = k_speed_lost;
-        test3 = 0;
+      //  test3 = 0;
     }
     else if (info.scene == TrackScene::SharpCurve)
     {
        target = k_speed_sharp;
-         test3 = 1;
+        // test3 = 1;
     }
         
     else if (info.scene == TrackScene::GentleCurve)
     {
     target = k_speed_curve;
-    test3 = 2;
+  //  test3 = 2;
     }
      else
     {
         target = k_speed_straight;
-        test3 = 3;
+       // test3 = 3;
     }
         
 

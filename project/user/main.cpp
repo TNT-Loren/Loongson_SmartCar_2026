@@ -22,8 +22,6 @@ void keyboard_poll_simple();
 */
 
 //int test=80;
-
-
 float test1, test2, test3;
 int key_mode = 0; 
 //===================================================
@@ -32,23 +30,23 @@ void sigint_handler(int signum);
 
 int main(int, char **)
 {
-    esc_init();
-    esc_set_speed_percent(0);
+    // esc_init();
+    // esc_set_speed_percent(0);
     imu_init();
     Encoder_Init();
     motor_init();
-    
-    
-    // if (tcp_debug_init("192.168.31.20", 8086))
-    // {
+    init_ipm_valid_region(); // 预先计算逆透视有效区域边界，供后续处理使用
+        // if (tcp_debug_init("192.168.31.20", 8086))
+        // {
+        //    //tcp_bind_variables(&target_yaw, &yaw);
+        //    //tcp_bind_variables(&speed1, &speed2);
+        // }
 
-    //     //tcp_bind_variables(&target_yaw, &yaw);
-    //    // tcp_bind_variables(&speed1, &speed2);
-    // }
-    if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
+        if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
     {
         return -1;
     }
+
     if (uvc_dev.init(UVC_PATH) < 0)
     {
         std::cout << "  1 " << std::endl;
@@ -67,22 +65,28 @@ int main(int, char **)
     while (1)
     {
 
-        keyboard_poll_simple();// 轮询键盘输入，供调试用
-        esc_set_speed_percent(test1);
-        image_test();
-
+        //keyboard_poll_simple();// 轮询键盘输入，供调试用
+       // esc_set_speed_percent(test1);
+        //image_test();
+        image_process();
         // motor_set_speed(0, 0);
         if (need_print.load() == 1)
         {
-             static int count = 0;
-                if(++count==5)
+            static int count = 0;
+            if(++count==5)
             {
                 count = 0;
             }
-            std::cout << "test1: " << test1 <<"test2: "<<test2<<"test3: "<<test3<<std::endl;
-            need_print.store(0);
-            //std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
-            // std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
+            // std::cout << "test1: " << test1 << "test2: " << test2 << "test3: " << test3 << std::endl;
+            // need_print.store(0);
+            std::cout << " "
+                      << static_cast<int>(start_point_l[0]) << ","
+                      << static_cast<int>(start_point_l[1]) << " ,"
+                      << static_cast<int>(start_point_r[0]) << " ,"
+                      << static_cast<int>(start_point_r[1]) << std::endl;
+            // std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
+            //  std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
+             need_print.store(0);
         }
         system_delay_ms(10);
     }

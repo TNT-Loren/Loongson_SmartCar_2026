@@ -109,11 +109,12 @@
 #include "imu.hpp"
 #include "tcp.hpp"
 #include "pid.hpp"
-#include "image_test.hpp"
+//#include "image_test.hpp"
 #include "image.hpp"
 #include "car_control.hpp"
 #include "speed_strategy.hpp"
 #include "brushless.hpp"
+#include "IPM_image.hpp"
 
 //===================================================用户自定义文件===================================================
 

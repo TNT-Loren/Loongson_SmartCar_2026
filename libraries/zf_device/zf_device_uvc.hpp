@@ -41,10 +41,11 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 
-#define UVC_WIDTH       160 // 320//160
-#define UVC_HEIGHT      120 //240//120
+#define UVC_WIDTH       320 // 320//160
+#define UVC_HEIGHT      240 //240//120
 #define UVC_FPS         120
 #define UVC_PATH     "/dev/video0"
+
 
 #define UVC_AUTO_EXPOSURE_ENABLE    3 //3    // 开启自动曝光（适配LS2K0300平台/对应摄像头）(3为自动曝光模式，1为手动曝光模式)
 #define UVC_DEFAULT_EXPOSURE        80  //300  // 默认曝光值，范围一般在0-2500之间，具体看摄像头支持

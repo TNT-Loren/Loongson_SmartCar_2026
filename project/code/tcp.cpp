@@ -49,10 +49,13 @@ bool tcp_image_transmission_init(const char *ip, int port)
         printf("TCP Client OK. 成功连接逐飞助手!\n");
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
-        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], UVC_WIDTH, UVC_HEIGHT);
-        seekfree_assistant_camera_boundary_config(X_BOUNDARY, UVC_HEIGHT, left_edge_line, mid_line, right_edge_line, NULL, NULL, NULL);
 
-        return true;
+        //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, copy_image, image_width, image_height);
+        //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, ipm_image_array, image_width, image_height);
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image, image_width, image_height);
+        //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], UVC_WIDTH, UVC_HEIGHT);
+        seekfree_assistant_camera_boundary_config(X_BOUNDARY, image_height, left_edge_line,  mid_line, right_edge_line, NULL, NULL, NULL);
+       return true;
     }
     else
     {

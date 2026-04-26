@@ -1,3 +1,32 @@
+高优先级：视觉主循环、控制回调、TCP 图传线程在共享同一批非原子状态，先改这个最值。project/user/main.cpp:67 里主循环调用 image_test()；project/code/image.cpp:563 同时写 image_copy、g_track_info、
+    vision_target_yaw；project/code/scheduler.cpp:82 又在定时回调里直接读这些值；project/code/scheduler.cpp:125 的后台线程还在无锁发送图像，注释里自己也写了“没有加锁”。这会导致偶发错帧、半更新边界、控制抖
+    动。
+  - 高优先级：image.cpp 已经是典型 god module，职责太多，后续任何算法调整都会继续往里糊。project/code/image.cpp:4 先定义了一堆全局状态；project/code/image.cpp:187 到 project/code/image.cpp:633 又把采图、阈
+    值/边界提取、中线滤波、偏差估计、场景分类、目标航向生成全塞在一个模块里。这里最适合拆成 FrameGrabber、TrackExtractor、VisionResult 三层。
+  - 高优先级：模块边界基本靠 extern 硬穿透，调试状态也污染了业务逻辑。project/code/image.hpp:6 暴露了整套图像和边线缓存；project/code/scheduler.hpp:9 暴露调度器和 PWM 状态；project/user/main.hpp:6 暴露
+    test1/test2/test3；更离谱的是 project/code/speed_strategy.cpp:25 里速度策略还在回写 test3。这类代码看起来“方便”，但长期结果就是谁都能读谁都能改，完全没法做局部重构。
+  - 中优先级：状态机和实际行为已经漂移了，很多分支是“看上去有，实际上没走到”。project/code/speed_strategy.hpp:10 定义了 LostLine，但 project/code/image.cpp:609 实际只会产出 Straight/GentleCurve/SharpCurve；
+    project/code/scheduler.cpp:26 的 target_speed/target_yaw 也已经偏半废弃；project/code/image.cpp:30 的断点标志和圆环检测函数同样没有形成完整闭环。先删掉死分支，代码会清爽很多。
+  - 中优先级：main.cpp 把正式流程、人工调试、设备参数写死到一起了。project/user/main.cpp:48 里 IP 写死；project/user/main.cpp:65 曝光写死；project/user/main.cpp:70 键盘热键长期挂着；project/user/main.cpp:71
+    还直接拿 test1 去推 ESC。建议至少分出 AppConfig 和 DebugConsole，让比赛运行模式和实验模式可切换。
+  - 中优先级：构建系统在放大历史包袱。project/user/CMakeLists.txt:79 用 aux_source_directory 全目录扫源码，结果 project/code/image_test.cpp:1 这种整文件注释掉的历史实现还挂在仓库里。短期没炸，长期一定会
+    把“备份代码”和“正式代码”混脏。
+
+  假设
+
+  - 这是静态审查，我没跑编译和上板测试。
+  - 我按当前入口判断 master_timer 回调、主循环、TCP 线程是并发关系；如果底层其实串行，并发问题会降级，但当前代码和注释都在按并发模型写。
+
+  建议顺序
+
+  1. 先做 VisionResult 快照，把视觉输出改成“生成结果结构体”，控制线程只读快照，TCP 图传改双缓冲或加锁。
+  2. 再拆 image.cpp，同时收掉 extern，把 test1/test2/test3/key_mode 赶出业务模块。
+  3. 最后清理 CMake 和 dead code，把 image_test.cpp 这类历史残留移走。
+
+  如果你要，我可以直接按这个顺序先帮你做第一刀重构，把最脏的共享状态收起来。
+
+
+
 //===============
 时间：2026-04-22 21:29:16 CST
 用户问题：编译出现问题。

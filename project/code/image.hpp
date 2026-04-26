@@ -28,9 +28,10 @@ extern uint8 white_point;                  // 白点阈值
 extern uint8 black_point;                  // 黑点阈值
 extern uint8 remote_distance[SEARCH_W];    // 远近距离数组 记录每列的边界位置
 
-extern uint8 left_edge_line[SEARCH_H];     // 左边界线
-extern uint8 right_edge_line[SEARCH_H];    // 右边界线
-extern uint8 mid_line[SEARCH_H];    // 中线
+// 旧搜线模块的边线数组已停用，当前由 IPM_image.hpp 提供 160x120 的逆透视边线。
+// extern uint8 left_edge_line[SEARCH_H];
+// extern uint8 right_edge_line[SEARCH_H];
+//extern uint8 mid_line[SEARCH_H];    // 中线
 
 extern float vision_target_yaw; // 保存为“这帧图像给出的目标航向”
 

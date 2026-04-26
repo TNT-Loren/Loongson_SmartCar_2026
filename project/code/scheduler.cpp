@@ -1,4 +1,5 @@
 #include "scheduler.hpp"
+#include "IPM_image.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -129,10 +130,12 @@ void tcp_background_thread()
     while (true)
     {
        // tcp_update_task(); // 执行网络收发与调参读取
-        // 简单图传方案：主循环持续刷新 bin_image，这里只负责按固定频率发送当前图像。
-        // 这样改动最小，但发送时没有加锁，偶发情况下可能抓到一半更新中的图像。
-        seekfree_assistant_camera_send();
-        usleep(20000); // 休眠约 30ms (33Hz)，足够看波形
+        // 图传与逆透共用 ipm_image_array，发送时需要加锁，避免读到清零后尚未填满的半帧。
+        {
+            std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
+            seekfree_assistant_camera_send();
+        }
+        usleep(20000); // 休眠约 20ms (50Hz)
     }
 }
     
