@@ -176,13 +176,13 @@ uint32 zf_driver_tcp_client::send_data(const uint8 *buff, uint32 length)
         }
         else if (send_len == -1)
         {
+            // 发送失败，判断失败类型
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                //【更改逐飞库频繁发送太烦了，只更改一次】
-                if (retry_count == 0) // 仅在第一次重试时打印警告
-                {
-                    printf("send_data: buffer full, retrying...\r\n");
-                }
+                // 非阻塞模式：发送缓冲区满，暂时无法发送，延时后重发
+                printf("send_data: buffer full, retry(%d/%d), remain %d bytes\r\n", 
+                       retry_count + 1, m_max_retry, length - total_sent);
+                usleep(m_retry_interval * 1000); // 毫秒转微秒
                 retry_count++;
             }
             else

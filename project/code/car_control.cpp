@@ -10,7 +10,7 @@ uint8_t midline2_fff, midline2_ff, midline2_f;
 void fit_midline(void) // 拟和中线，并进行滤波
 {
     uint8 i;
-    for (i = UVC_HEIGHT - 2; i >= 1; i--)
+    for (i = image_height - 2; i >= 1; i--)
     {
         if (mid_line[i] - mid_line[i + 1] > 0)
         {
@@ -32,7 +32,7 @@ void fit_midline(void) // 拟和中线，并进行滤波
 void HDPJ_lvbo(void) // "滑动平均滤波"的拼音缩写
 {
     uint8 i;
-    for (i = UVC_HEIGHT - 3; i >= 3; i--)
+    for (i = image_height - 3; i >= 3; i--)
     {
         mid_line[i] = (mid_line[i + 2] + mid_line[i + 1] + mid_line[i] + mid_line[i - 1] + mid_line[i - 2]) / 5;
     }

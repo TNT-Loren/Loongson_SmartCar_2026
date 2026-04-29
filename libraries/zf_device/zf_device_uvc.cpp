@@ -147,7 +147,7 @@ bool zf_device_uvc::is_camera_opened() const
 // 函数简介 设置自动曝光模式（新增实现）
 // 参数说明 auto_exposure_mode 自动曝光模式
 // 返回参数 int8 0-设置成功  -1-设置失败/摄像头未打开
-// 使用示例 int8 res = uvc_obj.set_auto_exposure(UVC_AUTO_EXPOSURE_ENABLE);
+// 使用示例 int8 res = uvc_obj.set_auto_exposure(UVC_AUTO_EXPOSURE_MODE);
 // 备注信息 适配LS2K0300平台，3=开启自动曝光，1=关闭自动曝光（手动模式）
 //-------------------------------------------------------------------------------------------------------------------
 int8 zf_device_uvc::set_auto_exposure(int32_t auto_exposure_mode)
@@ -309,13 +309,18 @@ int8 zf_device_uvc::init(const char *path)
         std::cout << "find uvc camera Successfully." << std::endl;
     }
 
-    cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+    #if(UVC_USE_MJPG == 0)
+        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('Y', 'U', 'Y', '2'));
+    #else
+        cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+    #endif
+
     cap.set(cv::CAP_PROP_FRAME_WIDTH, UVC_WIDTH);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, UVC_HEIGHT);
     cap.set(cv::CAP_PROP_FPS, UVC_FPS);
 
     // 初始化时默认开启自动曝光
-    set_auto_exposure(UVC_AUTO_EXPOSURE_ENABLE);
+    set_auto_exposure(UVC_AUTO_EXPOSURE_MODE);
 
     std::cout << "get uvc width = "  << cap.get(cv::CAP_PROP_FRAME_WIDTH)  << std::endl;
     std::cout << "get uvc height = " << cap.get(cv::CAP_PROP_FRAME_HEIGHT) << std::endl;

@@ -1,5 +1,5 @@
 /*********************************************************************************************************************
-* LS2K0300 Opensourec Library 即（LS2K0300 开源库）是一个基于官方 SDK 接口的第三方开源库
+* LS2K0300 Opensource Library 即（LS2K0300 开源库）是一个基于官方 SDK 接口的第三方开源库
 * Copyright (c) 2022 SEEKFREE 逐飞科技
 *
 * 本文件是LS2K0300 开源库的一部分
@@ -21,7 +21,7 @@
 * 许可证副本在 libraries 文件夹下 即该文件夹下的 LICENSE 文件
 * 欢迎各位使用并传播本程序 但修改内容时必须保留逐飞科技的版权声明（即本声明）
 *
-* 文件名称          main
+* 文件名称          zf_device_tft180_fb.cpp
 * 公司名称          成都逐飞科技有限公司
 * 适用平台          LS2K0300
 * 店铺链接          https://seekfree.taobao.com/
@@ -169,7 +169,7 @@ void zf_device_tft180::draw_line (uint16 x_start, uint16 y_start, uint16 x_end, 
 // 参数说明     dis_value_max   波形显示最大值 参数范围 [0, height]
 // 返回参数     void
 // 使用示例     tft180.show_wave(0, 0, data, 128, 64, 64, 32);
-// 备注信息     
+// 备注信息     先将显示区域清为背景色，再按比例映射并绘制波形点
 //-------------------------------------------------------------------------------------------------------------------
 void zf_device_tft180::show_wave (uint16 x, uint16 y, const uint16 *wave, uint16 width, uint16 value_max, uint16 dis_width, uint16 dis_value_max)
 {
@@ -358,9 +358,8 @@ void zf_device_tft180::show_float (uint16 x, uint16 y, const double dat, uint8 n
 // 返回参数     void
 // 使用示例     tft180_show_gray_image(0, 0, mt9v03x_image[0], MT9V03X_W, MT9V03X_H, MT9V03X_W, MT9V03X_H, 0);
 // 备注信息     用于显示总钻风的图像
-//              如果要显示二值化图像 直接修改最后一个参数为需要的二值化阈值即可
-//              如果要显示二值化图像 直接修改最后一个参数为需要的二值化阈值即可
-//              如果要显示二值化图像 直接修改最后一个参数为需要的二值化阈值即可
+//              当 threshold 为 0 时按灰度映射为 RGB565；非 0 时按阈值二值化显示
+//              当前实现按 image 的 width/height 绘制，dis_width/dis_height 参数预留未使用
 //-------------------------------------------------------------------------------------------------------------------
 void zf_device_tft180::show_gray_image (uint16 x, uint16 y, const uint8 *image, uint16 width, uint16 height, uint16 dis_width, uint16 dis_height, uint8 threshold)
 {
@@ -405,9 +404,8 @@ void zf_device_tft180::show_gray_image (uint16 x, uint16 y, const uint8 *image, 
 // 返回参数     void
 // 使用示例     tft180_show_rgb565_image(0, 0, scc8660_image[0], SCC8660_W, SCC8660_H, SCC8660_W, SCC8660_H, 1);
 // 备注信息     用于显示凌瞳的 RGB565 的图像
-//              如果要显示低位在前的其他 RGB565 图像 修改最后一个参数即可
-//              如果要显示低位在前的其他 RGB565 图像 修改最后一个参数即可
-//              如果要显示低位在前的其他 RGB565 图像 修改最后一个参数即可
+//              当 color_mode 为 1 时进行高低字节交换，适配不同 RGB565 数据端序
+//              当前实现按 image 的 width/height 绘制，dis_width/dis_height 参数预留未使用
 //-------------------------------------------------------------------------------------------------------------------
 void zf_device_tft180::show_rgb565_image (uint16 x, uint16 y, const uint16 *image, uint16 width, uint16 height, uint16 dis_width, uint16 dis_height, uint8 color_mode)
 {
@@ -442,19 +440,18 @@ void zf_device_tft180::init(const char *path, uint8 is_reload_driver)
 
     if (is_reload_driver)
     {
-        printf("tft180: rmmod fb_st7789v driver ...\n");
-        // 卸载fb_st7789v驱动模块，忽略卸载失败(比如驱动本就没加载的情况)
-        system("rmmod fb_st7789v > /dev/null 2>&1");
+        printf("tft180: rmmod fb_st7735r driver ...\n");
+        // 卸载fb_st7735r驱动模块，忽略卸载失败(比如驱动本就没加载的情况)
+        system("rmmod fb_st7735r > /dev/null 2>&1");
         usleep(200*1000); // 延时200ms，保证驱动卸载干净，避免加载失败
-        printf("tft180: insmod fb_st7789v driver ...\n");
-        // 重新加载fb_st7789v驱动模块，必须保证驱动文件路径正确
-        if(system("insmod /lib/modules/4.19.190/fb_st7789v.ko") != 0)
+        printf("tft180: insmod fb_st7735r driver ...\n");
+        // 重新加载fb_st7735r驱动模块，必须保证驱动文件路径正确
+        if(system("insmod /lib/modules/4.19.190/fb_st7735r.ko") != 0)
         {
-            perror("insmod fb_st7789v error");
+            perror("insmod fb_st7735r error");
             exit(EXIT_FAILURE);
         }
-        usleep(200*1000); // 延时300ms，驱动加载完成+硬件初始化完成，关键延时
-        /***********************************************************************************************/
+        usleep(200*1000); // 延时200ms，驱动加载完成+硬件初始化完成，关键延时
     }
     
  
@@ -477,9 +474,9 @@ void zf_device_tft180::init(const char *path, uint8 is_reload_driver)
         exit(EXIT_FAILURE);
     }
 
-    for(uint16 i=0;i<240;i++)
+    for(uint16 i=0;i<this->width;i++)
     {
-        for(uint16 j=0;j<320;j++)
+        for(uint16 j=0;j<this->height;j++)
         {
             draw_point(i, j, DEFAULT_BGCOLOR);
         }

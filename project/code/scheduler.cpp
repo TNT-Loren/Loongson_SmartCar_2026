@@ -130,7 +130,7 @@ void tcp_background_thread()
     while (true)
     {
        // tcp_update_task(); // 执行网络收发与调参读取
-        // 图传与逆透共用 ipm_image_array，发送时需要加锁，避免读到清零后尚未填满的半帧。
+        // 图传发送 debug_image，发送时加锁，避免读到正在重绘的半帧。
         {
             std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
             seekfree_assistant_camera_send();

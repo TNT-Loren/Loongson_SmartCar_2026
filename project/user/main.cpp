@@ -1,6 +1,7 @@
 #include "zf_common_headfile.hpp"
 #include "main.hpp"
 #include <iostream>
+#include "IPM_image.hpp"
 #include "scheduler.hpp" // 引入中央调度器
 
 #include <termios.h>
@@ -32,9 +33,11 @@ int main(int, char **)
 {
     // esc_init();
     // esc_set_speed_percent(0);
-    imu_init();
-    Encoder_Init();
-    motor_init();
+
+    // imu_init();
+    // Encoder_Init();
+    // motor_init();
+
     init_ipm_valid_region(); // 预先计算逆透视有效区域边界，供后续处理使用
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
@@ -77,13 +80,8 @@ int main(int, char **)
             {
                 count = 0;
             }
-            // std::cout << "test1: " << test1 << "test2: " << test2 << "test3: " << test3 << std::endl;
-            // need_print.store(0);
-            std::cout << " "
-                      << static_cast<int>(start_point_l[0]) << ","
-                      << static_cast<int>(start_point_l[1]) << " ,"
-                      << static_cast<int>(start_point_r[0]) << " ,"
-                      << static_cast<int>(start_point_r[1]) << std::endl;
+             std::cout << "test1: " << test1 << "test2: " << test2 << std::endl;
+
             // std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
             //  std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
              need_print.store(0);
@@ -166,8 +164,8 @@ void keyboard_poll_simple()
         {
         case 'a':
         case 'A':
-            test1 += 10.0f;
-            std::cout << "test1: " << test1 << std::endl;
+            //test1 += 10.0f;
+           // std::cout << "test1: " << test1 << std::endl;
             break;
 
         case 'b':

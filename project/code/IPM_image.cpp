@@ -3,18 +3,19 @@
 #include <algorithm>
 #include <cstring>
 
-TrackInfo g_track_info; // 全局赛道信息对象，供视觉模块填充，控制模块读取
 zf_device_uvc uvc_dev; // 定义UVC免驱摄像头设备对象，用于摄像头初始化/图像采集
 uint8 *rgay_image;     // 灰度图像数据指针，指向摄像头采集到的灰度图像缓冲区首地址
 
 uint8 copy_image[image_height][image_width]; // 图像处理模块使用的图像数据缓冲区，供IPM变换等后续处理使用
 // cv::Mat copy_image(image_height, image_width, CV_8UC1); // 等效于uint8 copy_image[image_height][image_width];
 uint8_t ipm_image_array[image_height][image_width];// IPM变换后的图像数据缓冲区，供后续处理使用
+uint16 debug_image[image_height][image_width]; // RGB565 调试图像缓冲区，供 SCC8660 彩色图传使用
 uint8 bin_image[image_height][image_width]; // 逆透视后二值图，供后续搜线/丢线判断使用
 std::mutex g_ipm_image_mutex;
 static uint8_t ipm_work_array[image_height][image_width] = {0}; // 逆透写入临时缓冲区，避免图传线程读到半帧
 static constexpr uint8 k_max_lost_frame_count = 5; // 连续丢失有效图像帧的最大容忍次数，超过后可触发安全机制
 static constexpr uint8_t k_ipm_invalid_fill_value = 255; // 无效区统一填白，避免被误判成赛道黑区
+static constexpr uint16 k_debug_invalid_fill_color = 0x000F; // RGB565 调试图中的无效区填充色
 static constexpr int k_ipm_valid_margin = 2; // 有效边界向内收缩一点，减少边缘误判
 static bool g_ipm_valid_region_initialized = false;
 
@@ -31,9 +32,8 @@ float vision_target_yaw = 0.0f; // 保存为“这帧图像给出的目标航向
 
 //==============================//========================//===============================
 
-// ========================= 逆透视参数区 =========================
 // 全局查表数组
-int valid_l_bound[image_height];
+int valid_l_bound[image_height];// 每一行逆透视有效区域的左边界，若 left > right 说明该行无效
 int valid_r_bound[image_height];
 uint8 start_point_l[2] = {0}; // start_point_l[0]：左起点 x
 uint8 start_point_r[2] = {0};
@@ -41,21 +41,23 @@ uint8 left_edge_line[image_height] = {0};// 八邻域得到的左边界线
 uint8 right_edge_line[image_height] = {0};
 static constexpr int k_start_black_confirm_count = 2; // 起始点跳变判定时，至少需要连续这么多个黑点
 static constexpr int k_valid_box_bottom_window = 5; // 画框底边时参考的底部行数窗口
+static constexpr int k_search_top_stop_row = 0; // 八邻域搜线到达该行后停止继续向左右扩展，避免沿顶边横爬
 static int g_valid_box_bottom_row = -1;   // 预计算得到的画框底线所在行
 static int g_valid_box_bottom_left = -1;  // 预计算得到的画框底线左端点
 static int g_valid_box_bottom_right = -1; // 预计算得到的画框底线右端点
 static int g_valid_box_start_row = -1;    // 预计算得到的起始点搜索行
 static int g_valid_box_start_left = -1;   // 起始点搜索行对应的有效左边界
 static int g_valid_box_start_right = -1;  // 起始点搜索行对应的有效右边界
-static constexpr uint16 k_max_search_points = image_height * 3;
-static uint16 points_l[k_max_search_points][2] = {{0}};
-static uint16 points_r[k_max_search_points][2] = {{0}};
-static uint8 dir_l[k_max_search_points] = {0};
-static uint8 dir_r[k_max_search_points] = {0};
-static uint16 g_left_point_count = 0;
-static uint16 g_right_point_count = 0;
 
-static int clamp_int(int value, int min_value, int max_value)
+// 搜到的左边界点坐标数组，第一维是点的索引，第二维0/1分别是x/y坐标
+uint16 points_l[k_max_search_points][2] = {{0}};
+uint16 points_r[k_max_search_points][2] = {{0}};
+uint8 dir_l[k_max_search_points] = {0};
+uint8 dir_r[k_max_search_points] = {0};
+uint16 g_left_point_count = 0;// 搜到的左边界点数量
+uint16 g_right_point_count = 0;
+
+static int clamp_int(int value, int min_value, int max_value)// 整数范围限制函数，超出范围的部分会被压缩到边界值
 {
     if (value < min_value)
     {
@@ -71,6 +73,11 @@ static int clamp_int(int value, int min_value, int max_value)
 static int abs_int(int value)
 {
     return (value >= 0) ? value : -value;
+}
+
+static inline uint16 swap_rgb565_bytes(uint16 color)
+{
+    return static_cast<uint16>((color << 8) | (color >> 8));
 }
 
 static inline uint8 get_safe_pixel(int x, int y)
@@ -174,6 +181,13 @@ static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
                 points_l[l_data_statics][1] = static_cast<uint16>(center_point_l[1]);
                 ++l_data_statics;
 
+                if (center_point_l[1] <= k_search_top_stop_row)
+                {
+                    left_active = 0;
+                    left_run = 0;
+                    continue;
+                }
+
                 index_l = 0;
                 for (i = 0; i < 8; ++i)
                 {
@@ -228,6 +242,13 @@ static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
                 points_r[r_data_statics][0] = static_cast<uint16>(center_point_r[0]);
                 points_r[r_data_statics][1] = static_cast<uint16>(center_point_r[1]);
                 ++r_data_statics;
+
+                if (center_point_r[1] <= k_search_top_stop_row)
+                {
+                    right_active = 0;
+                    right_run = 0;
+                    continue;
+                }
 
                 index_r = 0;
                 for (i = 0; i < 8; ++i)
@@ -754,7 +775,7 @@ void turn_to_bin(void)
 
         for (int j = row_left; j <= row_right; j++)
         {
-            if (ipm_image_array[i][j] > Threshold)
+            if (ipm_work_array[i][j] > Threshold)
             {
                 bin_image[i][j] = 255;
             }
@@ -827,6 +848,11 @@ void image_filter(uint8 (*image)[image_width])
  */
 void draw_valid_region_box(uint8 (*image)[image_width])
 {
+    if (!g_ipm_valid_region_initialized)
+    {
+        return;
+    }
+
     for (int row = 0; row < image_height; ++row)
     {
         const int row_left = valid_l_bound[row];
@@ -840,7 +866,10 @@ void draw_valid_region_box(uint8 (*image)[image_width])
         image[row][row_right] = 0;
     }
 
-    if (g_valid_box_bottom_row < 0)
+    if (g_valid_box_bottom_row < 0 || g_valid_box_bottom_row >= image_height ||
+        g_valid_box_bottom_left < 0 || g_valid_box_bottom_left >= image_width ||
+        g_valid_box_bottom_right < 0 || g_valid_box_bottom_right >= image_width ||
+        g_valid_box_bottom_left > g_valid_box_bottom_right)
     {
         return;
     }
@@ -955,6 +984,26 @@ void find_start_point_by_valid_box(uint8 (*image)[image_width])
     }
 }
 
+static void fill_debug_image(void)
+{
+    std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
+
+    // 灰度底图直接产出大端序 RGB565，与后面叠加标记的字节序一致，
+    // 省去整帧 19200 像素的独立字节交换遍历。
+    dbg_from_gray(debug_image, bin_image, valid_l_bound, valid_r_bound,
+                  k_debug_invalid_fill_color, true);
+
+    // 叠加标记颜色在写入前交换一次字节序，与底图大端序对齐。
+    dbg_cross(debug_image, start_point_l[0], start_point_l[1],
+              swap_rgb565_bytes(RGB565_GREEN), 2);
+    dbg_cross(debug_image, start_point_r[0], start_point_r[1],
+              swap_rgb565_bytes(RGB565_BLUE), 2);
+    dbg_trace_points(debug_image, points_l, g_left_point_count,
+                     swap_rgb565_bytes(RGB565_RED), 1);
+    dbg_trace_points(debug_image, points_r, g_right_point_count,
+                     swap_rgb565_bytes(RGB565_BLUE), 1);
+}
+
 
 //===========================================================================
 void image_process(void)
@@ -1029,14 +1078,18 @@ void image_process(void)
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
-        std::memcpy(ipm_image_array, ipm_work_array, sizeof(ipm_image_array));
-    }
+    // 旧的灰度 TCP 图传接口，先保留注释以便回退。
+    // {
+    //     std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
+    //     std::memcpy(ipm_image_array, ipm_work_array, sizeof(ipm_image_array));
+    // }
 
     turn_to_bin();    
     image_filter(bin_image);
     draw_valid_region_box(bin_image);
     find_start_point_by_valid_box(bin_image);
     update_track_lines_from_start_points();
+    fill_debug_image();
+    test1 = g_left_point_count;
+    test2 = g_right_point_count;
 }

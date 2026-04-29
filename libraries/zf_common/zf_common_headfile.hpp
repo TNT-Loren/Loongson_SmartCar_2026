@@ -115,6 +115,7 @@
 #include "speed_strategy.hpp"
 #include "brushless.hpp"
 #include "IPM_image.hpp"
+#include "zgc_draw_tool.hpp"
 
 //===================================================用户自定义文件===================================================
 

@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 
+TrackInfo g_track_info;
+
 namespace
 {
     // 基础目标车速配置

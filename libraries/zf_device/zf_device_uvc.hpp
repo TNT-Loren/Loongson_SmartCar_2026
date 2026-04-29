@@ -41,14 +41,21 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 
-#define UVC_WIDTH       320 // 320//160
-#define UVC_HEIGHT      240 //240//120
-#define UVC_FPS         120
+// Select capture format FOURCC at compile time.
+#define UVC_USE_MJPG  0  // 0: YUY2  1: MJPG
+
+#define UVC_WIDTH     320
+#define UVC_HEIGHT    240
+#define UVC_FPS       180
 #define UVC_PATH     "/dev/video0"
+#define UVC_AUTO_EXPOSURE_MODE     UVC_AUTO_EXPOSURE_ENABLE     // 开启自动曝光（适配LS2K0300平台/对应摄像头）(3为自动曝光模式，1为手动曝光模式)
+#define UVC_DEFAULT_EXPOSURE       300                          // 默认曝光值，范围一般在0-2500之间，具体看摄像头支持
 
-
-#define UVC_AUTO_EXPOSURE_ENABLE    3 //3    // 开启自动曝光（适配LS2K0300平台/对应摄像头）(3为自动曝光模式，1为手动曝光模式)
-#define UVC_DEFAULT_EXPOSURE        80  //300  // 默认曝光值，范围一般在0-2500之间，具体看摄像头支持
+typedef enum
+{
+    UVC_AUTO_EXPOSURE_DISABLE   = 1,    //手动曝光模式
+    UVC_AUTO_EXPOSURE_ENABLE    = 3,    //自动曝光模式
+}uvc_exposure_type_enum;
 
 class zf_device_uvc
 {
@@ -61,6 +68,7 @@ private:
     uint16_t*         rgb_image;  // RGB彩色图像数据指针
 
 public:
+    uvc_exposure_type_enum uvc_exposure_type;
     //-------------------------------------------------------------------------------------------------------------------
     // 函数简介 构造函数，初始化成员变量
     // 参数说明 无
@@ -119,10 +127,10 @@ public:
     // 函数简介 设置自动曝光模式
     // 参数说明 auto_exposure_mode 自动曝光模式
     // 返回参数 int8 0-设置成功  -1-设置失败/摄像头未打开
-    // 使用示例 int8 res = uvc_obj.set_auto_exposure(UVC_AUTO_EXPOSURE_ENABLE);
+    // 使用示例 int8 res = uvc_obj.set_auto_exposure(UVC_AUTO_EXPOSURE_MODE);
     // 备注信息 适配LS2K0300平台，3=开启自动曝光，1=关闭自动曝光（手动模式）
     //-------------------------------------------------------------------------------------------------------------------
-    int8 set_auto_exposure(int32_t auto_exposure_mode = UVC_AUTO_EXPOSURE_ENABLE);
+    int8 set_auto_exposure(int32_t auto_exposure_mode = UVC_AUTO_EXPOSURE_MODE);
 
     //-------------------------------------------------------------------------------------------------------------------
     // 函数简介 设置手动曝光值
