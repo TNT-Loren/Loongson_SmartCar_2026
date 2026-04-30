@@ -35,11 +35,24 @@ extern uint16 g_right_point_count; // 本帧右边原始搜线点数
 
 extern uint8 mid_line[image_height]; // 中线
 
+typedef struct
+{
+    uint8 flag; // 0=未找到, 1=找到
+    uint8 row;  // y 坐标
+    uint8 col;  // x 坐标
+} Track_Corner_Point_TypeDef;
+
+extern Track_Corner_Point_TypeDef g_left_upper_corner;  // 左上拐点
+extern Track_Corner_Point_TypeDef g_right_upper_corner; // 右上拐点
+extern Track_Corner_Point_TypeDef g_left_lower_corner;  // 左下拐点
+extern Track_Corner_Point_TypeDef g_right_lower_corner; // 右下拐点
+
 void init_ipm_valid_region(void);// 逆透视有效区域初始化函数，预先计算每行的有效左右边界，供后续处理使用
 void turn_to_bin(void);
 void draw_valid_region_box(uint8 (*bin_image)[image_width]);
 void find_start_point_by_valid_box(uint8 (*bin_image)[image_width]);
 void image_filter(uint8 (*bin_image)[image_width]);
+void detect_track_corner_points(void);
 void image_process(void);
 
 #endif

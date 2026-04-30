@@ -23,7 +23,7 @@ void keyboard_poll_simple();
 */
 
 //int test=80;
-float test1, test2, test3;
+float test1, test2, test3, test4;
 int key_mode = 0; 
 //===================================================
 void cleanup();
@@ -80,7 +80,10 @@ int main(int, char **)
             {
                 count = 0;
             }
-             std::cout << "test1: " << test1 << "test2: " << test2 << std::endl;
+            std::cout << " test3: " << test3
+                      << " test4: " << test4
+                      << " test1: " << test1
+                      << std::endl;
 
             // std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
             //  std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;

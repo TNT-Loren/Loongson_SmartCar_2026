@@ -1,4 +1,5 @@
 #include "IPM_image.hpp"
+#include "track_element.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -56,6 +57,18 @@ uint8 dir_l[k_max_search_points] = {0};
 uint8 dir_r[k_max_search_points] = {0};
 uint16 g_left_point_count = 0;// 搜到的左边界点数量
 uint16 g_right_point_count = 0;
+Track_Corner_Point_TypeDef g_left_upper_corner = {0, 0, 0};
+Track_Corner_Point_TypeDef g_right_upper_corner = {0, 0, 0};
+Track_Corner_Point_TypeDef g_left_lower_corner = {0, 0, 0};
+Track_Corner_Point_TypeDef g_right_lower_corner = {0, 0, 0};
+static constexpr int k_corner_mid_step = 6;
+static constexpr int k_corner_end_step = 12;
+static constexpr int k_corner_upper_scan_start = 7;
+static constexpr int k_corner_top_guard_row = 5;
+static constexpr int k_corner_vertical_delta_min = 4;
+static constexpr int k_corner_near_flat_delta_max = 4;
+static constexpr int k_corner_region_upper_max_row = (image_height * 2) / 3;
+static constexpr int k_corner_region_lower_min_row = image_height / 3;
 
 static int clamp_int(int value, int min_value, int max_value)// 整数范围限制函数，超出范围的部分会被压缩到边界值
 {
@@ -88,6 +101,71 @@ static inline uint8 get_safe_pixel(int x, int y)
     }
 
     return bin_image[y][x];
+}
+
+static void clear_corner_point(Track_Corner_Point_TypeDef &corner)
+{
+    corner.flag = 0;
+    corner.row = 0;
+    corner.col = 0;
+}
+
+static void reset_track_corner_points(void)
+{
+    clear_corner_point(g_left_upper_corner);
+    clear_corner_point(g_right_upper_corner);
+    clear_corner_point(g_left_lower_corner);
+    clear_corner_point(g_right_lower_corner);
+}
+
+static bool is_corner_point_in_target_region(int x, int y, bool want_left_region, bool want_upper_region)
+{
+    if (x < 0 || x >= image_width || y < 0 || y >= image_height)
+    {
+        return false;
+    }
+
+    if (want_upper_region)
+    {
+        if (y > k_corner_region_upper_max_row)
+        {
+            return false;
+        }
+    }
+    else if (y < k_corner_region_lower_min_row)
+    {
+        return false;
+    }
+
+    const int row_left = valid_l_bound[y];
+    const int row_right = valid_r_bound[y];
+    if (row_left > row_right)
+    {
+        return false;
+    }
+
+    const int row_span = row_right - row_left;
+    if (row_span < 6)
+    {
+        return false;
+    }
+
+    const int left_region_max = row_left + (row_span * 2) / 3;
+    const int right_region_min = row_left + row_span / 3;
+
+    if (want_left_region)
+    {
+        return x >= row_left && x <= left_region_max;
+    }
+
+    return x >= right_region_min && x <= row_right;
+}
+
+static void store_corner_point(Track_Corner_Point_TypeDef &corner, int x, int y)
+{
+    corner.flag = 1;
+    corner.row = static_cast<uint8>(clamp_int(y, 0, image_height - 1));
+    corner.col = static_cast<uint8>(clamp_int(x, 0, image_width - 1));
 }
 
 static void reset_track_search_results(void)
@@ -984,6 +1062,185 @@ void find_start_point_by_valid_box(uint8 (*image)[image_width])
     }
 }
 
+static void detect_left_lower_corner_point(void)
+{
+    if (g_left_point_count <= k_corner_end_step)
+    {
+        return;
+    }
+
+    for (uint16 i = 0; i + k_corner_end_step < g_left_point_count; ++i)
+    {
+        const int ax = points_l[i][0];
+        const int ay = points_l[i][1];
+        const int bx = points_l[i + k_corner_mid_step][0];
+        const int by = points_l[i + k_corner_mid_step][1];
+        const int cx = points_l[i + k_corner_end_step][0];
+        const int cy = points_l[i + k_corner_end_step][1];
+
+        if (cy <= k_corner_top_guard_row)
+        {
+            continue;
+        }
+
+        if (!is_corner_point_in_target_region(bx, by, true, false))
+        {
+            continue;
+        }
+
+        const int corner_dot = (ax - bx) * (cx - bx) + (ay - by) * (cy - by);
+        const int corner_balance_x = (cx - bx) + (ax - bx);
+        const int corner_balance_y = (cy - by) + (ay - by);
+
+        if (corner_dot >= 0 &&
+            bx > cx &&
+            by < ay &&
+            corner_balance_x <= 0 &&
+            corner_balance_y >= 0)
+        {
+            store_corner_point(g_left_lower_corner, bx, by);
+            return;
+        }
+    }
+}
+
+static void detect_right_lower_corner_point(void)
+{
+    if (g_right_point_count <= k_corner_end_step)
+    {
+        return;
+    }
+
+    for (uint16 i = 0; i + k_corner_end_step < g_right_point_count; ++i)
+    {
+        const int ax = points_r[i][0];
+        const int ay = points_r[i][1];
+        const int bx = points_r[i + k_corner_mid_step][0];
+        const int by = points_r[i + k_corner_mid_step][1];
+        const int cx = points_r[i + k_corner_end_step][0];
+        const int cy = points_r[i + k_corner_end_step][1];
+
+        if (cy <= k_corner_top_guard_row)
+        {
+            continue;
+        }
+
+        if (!is_corner_point_in_target_region(bx, by, false, false))
+        {
+            continue;
+        }
+
+        const int corner_dot = (ax - bx) * (cx - bx) + (ay - by) * (cy - by);
+        const int corner_balance_x = (cx - bx) + (ax - bx);
+        const int corner_balance_y = (cy - by) + (ay - by);
+
+        if (corner_dot >= 0 &&
+            cx > bx &&
+            by < ay &&
+            corner_balance_x >= 0 &&
+            corner_balance_y >= 0)
+        {
+            store_corner_point(g_right_lower_corner, bx, by);
+            return;
+        }
+    }
+}
+
+static void detect_left_upper_corner_point(void)
+{
+    if (g_left_point_count <= k_corner_end_step)
+    {
+        return;
+    }
+
+    for (uint16 i = k_corner_upper_scan_start; i + k_corner_end_step < g_left_point_count; ++i)
+    {
+        const int ax = points_l[i][0];
+        const int ay = points_l[i][1];
+        const int bx = points_l[i + k_corner_mid_step][0];
+        const int by = points_l[i + k_corner_mid_step][1];
+        const int cx = points_l[i + k_corner_end_step][0];
+        const int cy = points_l[i + k_corner_end_step][1];
+
+        if (cy <= k_corner_top_guard_row)
+        {
+            continue;
+        }
+
+        if (!is_corner_point_in_target_region(bx, by, true, true))
+        {
+            continue;
+        }
+
+        const int corner_dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by);
+        const int corner_trend_x = cx - ax;
+        const int corner_trend_y = cy - ay;
+
+        if (corner_dot >= 0 &&
+            bx > ax &&
+            by - cy > k_corner_vertical_delta_min &&
+            ay - by < k_corner_near_flat_delta_max &&
+            corner_trend_x >= 0 &&
+            corner_trend_y <= 0)
+        {
+            store_corner_point(g_left_upper_corner, bx, by);
+            return;
+        }
+    }
+}
+
+static void detect_right_upper_corner_point(void)
+{
+    if (g_right_point_count <= k_corner_end_step)
+    {
+        return;
+    }
+
+    for (uint16 i = k_corner_upper_scan_start; i + k_corner_end_step < g_right_point_count; ++i)
+    {
+        const int ax = points_r[i][0];
+        const int ay = points_r[i][1];
+        const int bx = points_r[i + k_corner_mid_step][0];
+        const int by = points_r[i + k_corner_mid_step][1];
+        const int cx = points_r[i + k_corner_end_step][0];
+        const int cy = points_r[i + k_corner_end_step][1];
+
+        if (cy <= k_corner_top_guard_row)
+        {
+            continue;
+        }
+
+        if (!is_corner_point_in_target_region(bx, by, false, true))
+        {
+            continue;
+        }
+
+        const int corner_dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by);
+        const int corner_trend_x = cx - ax;
+        const int corner_trend_y = cy - ay;
+
+        if (corner_dot >= 0 &&
+            ax > bx &&
+            by - cy > k_corner_vertical_delta_min &&
+            ay - by < k_corner_near_flat_delta_max &&
+            corner_trend_x <= 0 &&
+            corner_trend_y <= 0)
+        {
+            store_corner_point(g_right_upper_corner, bx, by);
+            return;
+        }
+    }
+}
+
+void detect_track_corner_points(void)
+{
+    reset_track_corner_points();
+    detect_left_lower_corner_point();
+    detect_right_lower_corner_point();
+    detect_left_upper_corner_point();
+    detect_right_upper_corner_point();
+}
+
 static void fill_debug_image(void)
 {
     std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
@@ -1002,11 +1259,149 @@ static void fill_debug_image(void)
                      swap_rgb565_bytes(RGB565_RED), 1);
     dbg_trace_points(debug_image, points_r, g_right_point_count,
                      swap_rgb565_bytes(RGB565_BLUE), 1);
+
+    if (g_left_upper_corner.flag)
+    {
+        dbg_cross(debug_image, g_left_upper_corner.col, g_left_upper_corner.row,
+                  swap_rgb565_bytes(RGB565_YELLOW), 2);
+    }
+
+    if (g_right_upper_corner.flag)
+    {
+        dbg_cross(debug_image, g_right_upper_corner.col, g_right_upper_corner.row,
+                  swap_rgb565_bytes(RGB565_CYAN), 2);
+    }
+
+    if (g_left_lower_corner.flag)
+    {
+        dbg_cross(debug_image, g_left_lower_corner.col, g_left_lower_corner.row,
+                  swap_rgb565_bytes(RGB565_MAGENTA), 2);
+    }
+
+    if (g_right_lower_corner.flag)
+    {
+        dbg_cross(debug_image, g_right_lower_corner.col, g_right_lower_corner.row,
+                  swap_rgb565_bytes(RGB565_BROWN), 2);
+    }
 }
 
+//=======================================================测试元素
+uint8_t line_lost = 0; // 0都不丢线，1左边丢线，2右边丢线，3都丢线
+#define k_lost_line_ratio_num 1//丢线阈值分子
+#define k_lost_line_ratio_den 7
+// // 辅助函数
 
-//===========================================================================
-void image_process(void)
+void lost_line_check(void)
+{
+    int16 left_overlap_count = 0; // 左边丢线点数
+        uint16 right_overlap_count = 0;
+        float left_overlap_ratio = 0.0f;//
+        float right_overlap_ratio = 0.0f;
+
+        uint8 left_lost = 0;
+        uint8 right_lost = 0;
+
+       line_lost = 0;
+
+        if (g_left_point_count == 0)
+        {
+            left_lost = 1;
+        }
+        else
+        {
+            for (uint16 i = 0; i < g_left_point_count && i < k_max_search_points; ++i)
+            {
+                const int x = points_l[i][0];
+                const int y = points_l[i][1];
+
+                if (y < 0 || y >= image_height)
+                {
+                    continue;
+                }
+
+                if (valid_l_bound[y] > valid_r_bound[y])
+                {
+                    continue;
+                }
+
+                if (x == valid_l_bound[y])
+                {
+                    ++left_overlap_count;
+                }
+            }
+
+            left_overlap_ratio = static_cast<float>(left_overlap_count) /
+                                 static_cast<float>(g_left_point_count);
+
+            if (left_overlap_count * k_lost_line_ratio_den >
+                g_left_point_count * k_lost_line_ratio_num)
+            {
+                left_lost = 1;
+            }
+        }
+
+        if (g_right_point_count == 0)
+        {
+            right_lost = 1;
+        }
+        else
+        {
+            for (uint16 i = 0; i < g_right_point_count && i < k_max_search_points; ++i)
+            {
+                const int x = points_r[i][0];
+                const int y = points_r[i][1];
+
+                if (y < 0 || y >= image_height)
+                {
+                    continue;
+                }
+
+                if (valid_l_bound[y] > valid_r_bound[y])
+                {
+                    continue;
+                }
+
+                if (x == valid_r_bound[y])
+                {
+                    ++right_overlap_count;
+                }
+            }
+
+            right_overlap_ratio = static_cast<float>(right_overlap_count) /
+                                  static_cast<float>(g_right_point_count);
+
+            if (right_overlap_count * k_lost_line_ratio_den >
+                g_right_point_count * k_lost_line_ratio_num)
+            {
+                right_lost = 1;
+            }
+        }
+
+        test3 = left_overlap_ratio;
+        test4 = right_overlap_ratio;
+
+        if (left_lost && right_lost)
+        {
+            line_lost = 3;
+        }
+        else if (left_lost)
+        {
+            line_lost = 1;
+        }
+        else if (right_lost)
+        {
+            line_lost = 2;
+        }
+}
+
+void track_element_update(void)
+{
+    lost_line_check();
+    detect_track_corner_points();
+}
+
+    //===========================================================================
+    void image_process(void)
 {
     if (!g_ipm_valid_region_initialized)
     {
@@ -1089,7 +1484,9 @@ void image_process(void)
     draw_valid_region_box(bin_image);
     find_start_point_by_valid_box(bin_image);
     update_track_lines_from_start_points();
+    track_element_update();
     fill_debug_image();
-    test1 = g_left_point_count;
-    test2 = g_right_point_count;
+    // test1 = g_left_point_count;
+    // test2 = g_right_point_count;
+    test1= line_lost;
 }

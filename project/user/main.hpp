@@ -3,7 +3,7 @@
 
 #include "zf_common_headfile.hpp"
 
-extern float test1, test2, test3;
+extern float test1, test2, test3, test4;
 extern int key_mode;
 
 #endif
