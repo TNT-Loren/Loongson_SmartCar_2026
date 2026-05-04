@@ -135,7 +135,7 @@ void tcp_background_thread()
             std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
             seekfree_assistant_camera_send();
         }
-        usleep(20000); // 休眠约 20ms (50Hz)
+        usleep(30000); // 休眠约 20ms (50Hz)
     }
 }
     

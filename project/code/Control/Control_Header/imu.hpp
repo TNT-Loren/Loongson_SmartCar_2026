@@ -34,6 +34,7 @@ public:
 
        // 数据读取 (供 PID 等模块使用)
        float get_yaw() const;
+       float get_unbounded_yaw() const;
 };
 
 // 声明全局实例，方便调度器直接访问

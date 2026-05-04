@@ -1,5 +1,6 @@
 #include "IPM_image.hpp"
 #include "track_element.hpp"
+#include "imu.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -9,7 +10,6 @@ uint8 *rgay_image;     // 灰度图像数据指针，指向摄像头采集到的
 
 uint8 copy_image[image_height][image_width]; // 图像处理模块使用的图像数据缓冲区，供IPM变换等后续处理使用
 // cv::Mat copy_image(image_height, image_width, CV_8UC1); // 等效于uint8 copy_image[image_height][image_width];
-uint8_t ipm_image_array[image_height][image_width];// IPM变换后的图像数据缓冲区，供后续处理使用
 uint16 debug_image[image_height][image_width]; // RGB565 调试图像缓冲区，供 SCC8660 彩色图传使用
 uint8 bin_image[image_height][image_width]; // 逆透视后二值图，供后续搜线/丢线判断使用
 std::mutex g_ipm_image_mutex;
@@ -29,8 +29,6 @@ static constexpr uint8 k_threshold_max_limit = 220;
 static uint8 g_last_threshold = k_threshold_default;
 uint8 mid_line[image_height]; // 中线
 
-float vision_target_yaw = 0.0f; // 保存为“这帧图像给出的目标航向”
-
 //==============================//========================//===============================
 
 // 全局查表数组
@@ -38,6 +36,8 @@ int valid_l_bound[image_height];// 每一行逆透视有效区域的左边界，
 int valid_r_bound[image_height];
 uint8 start_point_l[2] = {0}; // start_point_l[0]：左起点 x
 uint8 start_point_r[2] = {0};
+uint8 g_left_start_point_fallback_flag = 0;
+uint8 g_right_start_point_fallback_flag = 0;
 uint8 left_edge_line[image_height] = {0};// 八邻域得到的左边界线
 uint8 right_edge_line[image_height] = {0};
 static constexpr int k_start_black_confirm_count = 2; // 起始点跳变判定时，至少需要连续这么多个黑点
@@ -49,6 +49,11 @@ static int g_valid_box_bottom_right = -1; // 预计算得到的画框底线右�
 static int g_valid_box_start_row = -1;    // 预计算得到的起始点搜索行
 static int g_valid_box_start_left = -1;   // 起始点搜索行对应的有效左边界
 static int g_valid_box_start_right = -1;  // 起始点搜索行对应的有效右边界
+static uint8 g_left_ring_bridge_debug_flag = 0; // 本帧是否注入了左环补线，供 TCP 调试图显式标注
+static int g_left_ring_bridge_debug_x0 = 0;
+static int g_left_ring_bridge_debug_y0 = 0;
+static int g_left_ring_bridge_debug_x1 = 0;
+static int g_left_ring_bridge_debug_y1 = 0;
 
 // 搜到的左边界点坐标数组，第一维是点的索引，第二维0/1分别是x/y坐标
 uint16 points_l[k_max_search_points][2] = {{0}};
@@ -57,18 +62,45 @@ uint8 dir_l[k_max_search_points] = {0};
 uint8 dir_r[k_max_search_points] = {0};
 uint16 g_left_point_count = 0;// 搜到的左边界点数量
 uint16 g_right_point_count = 0;
+uint8 g_left_crossover_flag = 0;
+uint8 g_right_crossover_flag = 0;
 Track_Corner_Point_TypeDef g_left_upper_corner = {0, 0, 0};
 Track_Corner_Point_TypeDef g_right_upper_corner = {0, 0, 0};
 Track_Corner_Point_TypeDef g_left_lower_corner = {0, 0, 0};
 Track_Corner_Point_TypeDef g_right_lower_corner = {0, 0, 0};
+uint8 g_left_long_straight_flag = 0;
+uint8 g_right_long_straight_flag = 0;
+uint8 g_track_reference_width_valid = 0;
+uint8 g_track_reference_width = 0;
+uint8 g_track_reference_center = image_width / 2;
+uint8 g_track_reference_row = 0;
+static uint8 g_track_reference_width_by_row[image_height] = {0}; // 单边巡线补宽时使用的逐行参考宽度
+static uint8 g_track_reference_width_by_row_valid[image_height] = {0};
+static constexpr uint8 k_search_crossover_stop_count = 2;//多次
 static constexpr int k_corner_mid_step = 6;
 static constexpr int k_corner_end_step = 12;
 static constexpr int k_corner_upper_scan_start = 7;
 static constexpr int k_corner_top_guard_row = 5;
 static constexpr int k_corner_vertical_delta_min = 4;
 static constexpr int k_corner_near_flat_delta_max = 4;
-static constexpr int k_corner_region_upper_max_row = (image_height * 2) / 3;
+static constexpr int k_corner_region_upper_max_row = (image_height * 3) / 5;
 static constexpr int k_corner_region_lower_min_row = image_height / 3;
+static constexpr uint16 k_corner_upper_dir_candidate_skip = 2;      // 第 3 个候选
+static constexpr uint16 k_corner_lower_dir_candidate_back_skip = 1; // 倒数第 2 个候选
+static constexpr uint16 k_long_straight_min_point_count = 35;
+static constexpr uint16 k_long_straight_min_row_span = 50;
+static constexpr uint16 k_long_straight_sample_step = 4;
+static constexpr uint16 k_long_straight_dir_change_limit = 3;
+static constexpr uint16 k_long_straight_error_threshold = 3;
+static constexpr uint8 k_long_straight_boundary_overlap_ratio_num = 1;
+static constexpr uint8 k_long_straight_boundary_overlap_ratio_den = 4;
+static constexpr uint8 k_track_width_init_confirm_rows = 3;
+static constexpr int k_track_width_init_width_tolerance = 1;
+static constexpr int k_track_width_init_edge_tolerance = 1;
+static constexpr int k_left_ring_prepare_max_row = 29; // 左环第一段内，左上拐点先进入上三十行，才允许准备切到第二段
+static constexpr int k_left_ring_inside_ready_min_row = 50; // 左上拐点下移到该行后，允许从左环入口切到环内
+static constexpr int k_left_ring_inside_ready_max_row = 60;
+static constexpr float k_left_ring_exit_switch_yaw = 315.0f; // 左环累计角达到该值后，切到第三段并恢复右边巡线
 
 static int clamp_int(int value, int min_value, int max_value)// 整数范围限制函数，超出范围的部分会被压缩到边界值
 {
@@ -168,10 +200,256 @@ static void store_corner_point(Track_Corner_Point_TypeDef &corner, int x, int y)
     corner.col = static_cast<uint8>(clamp_int(x, 0, image_width - 1));
 }
 
+static bool is_left_search_point_in_safe_region(int x, int y)
+{
+    if (x < 0 || x >= image_width || y < 0 || y >= image_height)
+    {
+        return false;
+    }
+
+    const int row_left = valid_l_bound[y];
+    const int row_right = valid_r_bound[y];
+    if (row_left > row_right)
+    {
+        return false;
+    }
+
+    const int row_span = row_right - row_left;
+    if (row_span < 2)
+    {
+        return false;
+    }
+
+    const int left_limit = row_left + (row_span * 2) / 3;
+    return x >= row_left && x <= left_limit;
+}
+
+static bool is_right_search_point_in_safe_region(int x, int y)
+{
+    if (x < 0 || x >= image_width || y < 0 || y >= image_height)
+    {
+        return false;
+    }
+
+    const int row_left = valid_l_bound[y];
+    const int row_right = valid_r_bound[y];
+    if (row_left > row_right)
+    {
+        return false;
+    }
+
+    const int row_span = row_right - row_left;
+    if (row_span < 2)
+    {
+        return false;
+    }
+
+    const int right_limit = row_left + row_span / 3;
+    return x >= right_limit && x <= row_right;
+}
+
+static bool select_next_search_point(const int candidates[][2], uint8 candidate_count,
+                                     bool prefer_left_region,
+                                     int &next_x, int &next_y,
+                                     bool &used_safe_region)
+{
+    if (candidate_count == 0)
+    {
+        used_safe_region = false;
+        return false;
+    }
+
+    int best_safe_index = -1;
+    int best_any_index = 0;
+
+    for (uint8 i = 0; i < candidate_count; ++i)
+    {
+        const int x = candidates[i][0];
+        const int y = candidates[i][1];
+
+        if (candidates[best_any_index][1] > y)
+        {
+            best_any_index = i;
+        }
+
+        const bool in_safe_region = prefer_left_region ?
+                                    is_left_search_point_in_safe_region(x, y) :
+                                    is_right_search_point_in_safe_region(x, y);
+        if (!in_safe_region)
+        {
+            continue;
+        }
+
+        if (best_safe_index < 0 || candidates[best_safe_index][1] > y)
+        {
+            best_safe_index = i;
+        }
+    }
+
+    used_safe_region = (best_safe_index >= 0);
+    const int chosen_index = used_safe_region ? best_safe_index : best_any_index;
+    next_x = candidates[chosen_index][0];
+    next_y = candidates[chosen_index][1];
+    return true;
+}
+
+static uint8 calc_dir_step_diff(uint8 dir_a, uint8 dir_b)
+{
+    int diff = abs_int((int)dir_a - (int)dir_b);
+    if (diff > 4)
+    {
+        diff = 8 - diff;
+    }
+    return static_cast<uint8>(diff);
+}
+
+static uint16 count_boundary_overlap_points(const uint16 points[][2], uint16 point_count,
+                                            bool check_left_boundary, uint16 &valid_point_count)
+{
+    valid_point_count = 0;
+    uint16 overlap_count = 0;
+
+    for (uint16 i = 0; i < point_count && i < k_max_search_points; ++i)
+    {
+        const int x = points[i][0];
+        const int y = points[i][1];
+
+        if (x < 0 || x >= image_width || y < 0 || y >= image_height)
+        {
+            continue;
+        }
+
+        const int row_left = valid_l_bound[y];
+        const int row_right = valid_r_bound[y];
+        if (row_left > row_right)
+        {
+            continue;
+        }
+
+        ++valid_point_count;
+        const int target_bound = check_left_boundary ? row_left : row_right;
+        if (x == target_bound)
+        {
+            ++overlap_count;
+        }
+    }
+
+    return overlap_count;
+}
+
+static bool is_boundary_overlap_excessive(const uint16 points[][2], uint16 point_count,
+                                          bool check_left_boundary,
+                                          uint16 ratio_num, uint16 ratio_den)
+{
+    uint16 valid_point_count = 0;
+    const uint16 overlap_count = count_boundary_overlap_points(points, point_count,
+                                                               check_left_boundary, valid_point_count);
+    if (valid_point_count == 0)
+    {
+        return true;
+    }
+
+    return overlap_count * ratio_den > valid_point_count * ratio_num;
+}
+
+static bool is_boundary_long_straight(const uint16 points[][2], uint16 point_count,
+                                      const uint8 *dirs, uint8 crossover_flag,
+                                      bool check_left_boundary)
+{
+    if (crossover_flag || point_count < k_long_straight_min_point_count)
+    {
+        return false;
+    }
+
+    if (is_boundary_overlap_excessive(points, point_count, check_left_boundary,
+                                      k_long_straight_boundary_overlap_ratio_num,
+                                      k_long_straight_boundary_overlap_ratio_den))
+    {
+        return false;
+    }
+
+    uint16 bottom_index = 0;
+    uint16 top_index = 0;
+    for (uint16 i = 1; i < point_count; ++i)
+    {
+        if (points[i][1] > points[bottom_index][1])
+        {
+            bottom_index = i;
+        }
+        if (points[i][1] < points[top_index][1])
+        {
+            top_index = i;
+        }
+    }
+
+    const int ax = points[bottom_index][0];
+    const int ay = points[bottom_index][1];
+    const int bx = points[top_index][0];
+    const int by = points[top_index][1];
+    const int row_span = abs_int(ay - by);
+    if (row_span < k_long_straight_min_row_span)
+    {
+        return false;
+    }
+
+    uint16 dir_change_count = 0;
+    for (uint16 i = 1; i < point_count; ++i)
+    {
+        if (calc_dir_step_diff(dirs[i], dirs[i - 1]) >= 2)
+        {
+            ++dir_change_count;
+        }
+    }
+    if (dir_change_count > k_long_straight_dir_change_limit)
+    {
+        return false;
+    }
+
+    const int denom = std::max(abs_int(bx - ax), abs_int(by - ay));
+    if (denom <= 0)
+    {
+        return false;
+    }
+
+    uint32 err_sum = 0;
+    uint16 sample_count = 0;
+    for (uint16 i = k_long_straight_sample_step;
+         i + k_long_straight_sample_step < point_count;
+         i += k_long_straight_sample_step)
+    {
+        const int px = points[i][0];
+        const int py = points[i][1];
+        const int err_num = abs_int((px - ax) * (by - ay) - (py - ay) * (bx - ax));
+        const uint16 err = static_cast<uint16>((err_num + denom / 2) / denom);
+        err_sum += err;
+        ++sample_count;
+    }
+
+    if (sample_count == 0)
+    {
+        return false;
+    }
+
+    const uint16 mean_err = static_cast<uint16>((err_sum + sample_count / 2) / sample_count);
+    return mean_err <= k_long_straight_error_threshold;
+}
+
+void detect_track_long_straight_features(void)
+{
+    g_left_long_straight_flag = is_boundary_long_straight(points_l, g_left_point_count,
+                                                          dir_l, g_left_crossover_flag, true) ? 1 : 0;
+    g_right_long_straight_flag = is_boundary_long_straight(points_r, g_right_point_count,
+                                                           dir_r, g_right_crossover_flag, false) ? 1 : 0;
+}
+
 static void reset_track_search_results(void)
 {
     g_left_point_count = 0;
     g_right_point_count = 0;
+    g_left_crossover_flag = 0;
+    g_right_crossover_flag = 0;
+    g_left_long_straight_flag = 0;
+    g_right_long_straight_flag = 0;
 
     std::memset(points_l, 0, sizeof(points_l));
     std::memset(points_r, 0, sizeof(points_r));
@@ -208,13 +486,151 @@ static void fill_track_lines_from_valid_region(void)
     }
 }
 
+static void draw_line_on_binary_image(uint8 (*image)[image_width],
+                                      int x0, int y0, int x1, int y1,
+                                      uint8 color)
+{
+    x0 = clamp_int(x0, 0, image_width - 1);
+    y0 = clamp_int(y0, 0, image_height - 1);
+    x1 = clamp_int(x1, 0, image_width - 1);
+    y1 = clamp_int(y1, 0, image_height - 1);
+
+    int dx = abs_int(x1 - x0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int dy = -abs_int(y1 - y0);
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+
+    while (true)
+    {
+        image[y0][x0] = color;
+
+        if (x0 == x1 && y0 == y1)
+        {
+            break;
+        }
+
+        const int e2 = err << 1;
+        if (e2 >= dy)
+        {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void clear_left_ring_bridge_debug_state(void)
+{
+    g_left_ring_bridge_debug_flag = 0;
+    g_left_ring_bridge_debug_x0 = 0;
+    g_left_ring_bridge_debug_y0 = 0;
+    g_left_ring_bridge_debug_x1 = 0;
+    g_left_ring_bridge_debug_y1 = 0;
+}
+
+static void draw_left_ring_inside_bridge_on_binary_image(uint8 (*image)[image_width])
+{
+    const int x0 = 0;
+    const int y0 = 0;
+    const int x1 = clamp_int(static_cast<int>(start_point_r[0]), 0, image_width - 1);
+    const int y1 = clamp_int(static_cast<int>(start_point_r[1]), 0, image_height - 1);
+
+    g_left_ring_bridge_debug_flag = 1;
+    g_left_ring_bridge_debug_x0 = x0;
+    g_left_ring_bridge_debug_y0 = y0;
+    g_left_ring_bridge_debug_x1 = x1;
+    g_left_ring_bridge_debug_y1 = y1;
+
+    for (int row_offset = -1; row_offset <= 1; ++row_offset)
+    {
+        draw_line_on_binary_image(image,
+                                  x0, y0 + row_offset,
+                                  x1, y1 + row_offset,
+                                  0);
+    }
+}
+
+static void seed_track_width_reference_profile(uint8 width)
+{
+    const uint8 safe_width = static_cast<uint8>(clamp_int(static_cast<int>(width), 2, image_width - 1));
+    for (int row = 0; row < image_height; ++row)
+    {
+        g_track_reference_width_by_row[row] = safe_width;
+        g_track_reference_width_by_row_valid[row] = 1;
+    }
+}
+
+static int get_single_side_reference_width_for_row(int row, int fallback_width)
+{
+    if (row >= 0 && row < image_height && g_track_reference_width_by_row_valid[row])
+    {
+        return std::max(static_cast<int>(g_track_reference_width_by_row[row]), 2);
+    }
+
+    if (g_track_reference_width_valid)
+    {
+        return std::max(static_cast<int>(g_track_reference_width), 2);
+    }
+
+    return std::max(fallback_width, 2);
+}
+
+void update_mid_line_by_track_mode(uint8 track_mode)
+{
+    for (int row = 0; row < image_height; ++row)
+    {
+        int limit_left = 0;
+        int limit_right = image_width - 1;
+        if (valid_l_bound[row] <= valid_r_bound[row])
+        {
+            limit_left = valid_l_bound[row];
+            limit_right = valid_r_bound[row];
+        }
+
+        int left = clamp_int(static_cast<int>(left_edge_line[row]), limit_left, limit_right);
+        int right = clamp_int(static_cast<int>(right_edge_line[row]), limit_left, limit_right);
+        if (left > right)
+        {
+            std::swap(left, right);
+        }
+
+        int track_width = right - left;
+        if (track_mode != 0)
+        {
+            track_width = get_single_side_reference_width_for_row(row, track_width);
+        }
+        if (track_width < 2)
+        {
+            track_width = 2;
+        }
+
+        int mid = (left + right) / 2;
+        if (track_mode == 1)
+        {
+            const int virtual_right = clamp_int(left + track_width, limit_left, limit_right);
+            mid = (left + virtual_right) / 2;
+        }
+        else if (track_mode == 2)
+        {
+            const int virtual_left = clamp_int(right - track_width, limit_left, limit_right);
+            mid = (virtual_left + right) / 2;
+        }
+
+        mid_line[row] = static_cast<uint8>(clamp_int(mid, 0, image_width - 1));
+    }
+}
+
 static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
                        uint8 l_start_x, uint8 l_start_y,
                        uint8 r_start_x, uint8 r_start_y,
                        uint8 *highest)
 {
     uint16 i = 0;
-    uint16 j = 0;
 
     int search_filds_l[8][2] = {{0}};
     uint8 index_l = 0;
@@ -236,6 +652,8 @@ static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
     uint8 right_run = 1;
     uint8 left_active = 1;
     uint8 right_active = 1;
+    uint8 left_crossover_streak = 0;
+    uint8 right_crossover_streak = 0;
     int break_flag = k_max_search_points;
 
     while (break_flag-- && (left_active || right_active))
@@ -283,14 +701,24 @@ static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
 
                 if (index_l > 0)
                 {
-                    center_point_l[0] = temp_l[0][0];
-                    center_point_l[1] = temp_l[0][1];
-                    for (j = 1; j < index_l; ++j)
+                    bool used_safe_region = false;
+                    if (select_next_search_point(temp_l, index_l, true,
+                                                 center_point_l[0], center_point_l[1],
+                                                 used_safe_region))
                     {
-                        if (center_point_l[1] > temp_l[j][1])
+                        if (used_safe_region)
                         {
-                            center_point_l[0] = temp_l[j][0];
-                            center_point_l[1] = temp_l[j][1];
+                            left_crossover_streak = 0;
+                        }
+                        else
+                        {
+                            ++left_crossover_streak;
+                            if (left_crossover_streak >= k_search_crossover_stop_count)
+                            {
+                                g_left_crossover_flag = 1;
+                                left_active = 0;
+                                left_run = 0;
+                            }
                         }
                     }
                 }
@@ -345,14 +773,24 @@ static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
 
                 if (index_r > 0)
                 {
-                    center_point_r[0] = temp_r[0][0];
-                    center_point_r[1] = temp_r[0][1];
-                    for (j = 1; j < index_r; ++j)
+                    bool used_safe_region = false;
+                    if (select_next_search_point(temp_r, index_r, false,
+                                                 center_point_r[0], center_point_r[1],
+                                                 used_safe_region))
                     {
-                        if (center_point_r[1] > temp_r[j][1])
+                        if (used_safe_region)
                         {
-                            center_point_r[0] = temp_r[j][0];
-                            center_point_r[1] = temp_r[j][1];
+                            right_crossover_streak = 0;
+                        }
+                        else
+                        {
+                            ++right_crossover_streak;
+                            if (right_crossover_streak >= k_search_crossover_stop_count)
+                            {
+                                g_right_crossover_flag = 1;
+                                right_active = 0;
+                                right_run = 0;
+                            }
                         }
                     }
                 }
@@ -425,10 +863,62 @@ static void search_l_r(uint16 *l_stastic, uint16 *r_stastic,
     *r_stastic = r_data_statics;
 }
 
+static void update_track_width_reference_profile_from_rows(const int *left_by_row,
+                                                           const int *right_by_row)
+{
+    if (mode_element != 0)
+    {
+        return;
+    }
+
+    for (int row = 0; row < image_height; ++row)
+    {
+        if (left_by_row[row] < 0 || right_by_row[row] < 0)
+        {
+            continue;
+        }
+
+        const int row_left = valid_l_bound[row];
+        const int row_right = valid_r_bound[row];
+        if (row_left > row_right)
+        {
+            continue;
+        }
+
+        const int left = clamp_int(left_by_row[row], row_left, row_right);
+        const int right = clamp_int(right_by_row[row], row_left, row_right);
+        if (left >= right)
+        {
+            continue;
+        }
+
+        const int measured_width = right - left;
+        if (measured_width < 2)
+        {
+            continue;
+        }
+
+        int filtered_width = measured_width;
+        if (g_track_reference_width_by_row_valid[row])
+        {
+            filtered_width = (static_cast<int>(g_track_reference_width_by_row[row]) * 3 +
+                              measured_width + 2) / 4;
+        }
+
+        g_track_reference_width_by_row[row] =
+            static_cast<uint8>(clamp_int(filtered_width, 2, image_width - 1));
+        g_track_reference_width_by_row_valid[row] = 1;
+    }
+}
+
 static void convert_points_to_line_arrays(void)// 把搜到的离散点转换成每行一个边界坐标的形式，方便后续处理使用
 {
     int left_by_row[image_height];
     int right_by_row[image_height];
+    int top_left_found_row = image_height;
+    int top_right_found_row = image_height;
+    bool left_found_any = false;
+    bool right_found_any = false;
 
     for (int y = 0; y < image_height; ++y)
     {
@@ -450,6 +940,12 @@ static void convert_points_to_line_arrays(void)// 把搜到的离散点转换成
         {
             left_by_row[y] = x;
         }
+
+        if (y < top_left_found_row)
+        {
+            top_left_found_row = y;
+        }
+        left_found_any = true;
     }
 
     for (uint16 i = 0; i < g_right_point_count && i < k_max_search_points; ++i)
@@ -466,26 +962,44 @@ static void convert_points_to_line_arrays(void)// 把搜到的离散点转换成
         {
             right_by_row[y] = x;
         }
+
+        if (y < top_right_found_row)
+        {
+            top_right_found_row = y;
+        }
+        right_found_any = true;
     }
+
+    update_track_width_reference_profile_from_rows(left_by_row, right_by_row);
 
     int last_left = (start_point_l[0] < image_width) ? start_point_l[0] : (image_width / 2 - 1);
     int last_right = (start_point_r[0] < image_width) ? start_point_r[0] : (image_width / 2 + 1);
 
     for (int y = image_height - 1; y >= 0; --y)
     {
+        const int row_left = valid_l_bound[y];
+        const int row_right = valid_r_bound[y];
+        const bool has_valid_region = (row_left <= row_right);
+
         if (left_by_row[y] >= 0)
         {
             last_left = left_by_row[y];
+        }
+        else if ((!left_found_any || y < top_left_found_row) && has_valid_region)
+        {
+            last_left = row_left;
         }
 
         if (right_by_row[y] >= 0)
         {
             last_right = right_by_row[y];
         }
+        else if ((!right_found_any || y < top_right_found_row) && has_valid_region)
+        {
+            last_right = row_right;
+        }
 
-        const int row_left = valid_l_bound[y];
-        const int row_right = valid_r_bound[y];
-        if (row_left <= row_right)
+        if (has_valid_region)
         {
             last_left = clamp_int(last_left, row_left, row_right);
             last_right = clamp_int(last_right, row_left, row_right);
@@ -506,6 +1020,19 @@ static void convert_points_to_line_arrays(void)// 把搜到的离散点转换成
         left_edge_line[y] = static_cast<uint8>(last_left);
         right_edge_line[y] = static_cast<uint8>(last_right);
         mid_line[y] = static_cast<uint8>((last_left + last_right) / 2);
+    }
+}
+
+static void draw_track_line_overlay(uint16 (*img)[image_width])
+{
+    const uint16 edge_color = swap_rgb565_bytes(RGB565_GRAY);
+    const uint16 mid_color = swap_rgb565_bytes(RGB565_BLACK);
+
+    for (int row = 0; row < image_height; ++row)
+    {
+        dbg_point(img, left_edge_line[row], row, edge_color);
+        dbg_point(img, right_edge_line[row], row, edge_color);
+        dbg_point(img, mid_line[row], row, mid_color);
     }
 }
 
@@ -539,6 +1066,320 @@ static void update_track_lines_from_start_points(void)// 从起始点更新轨�
     convert_points_to_line_arrays();
 }
 
+static bool find_longest_white_segment_in_row(const uint8 *row_ptr,
+                                              int search_left, int search_right,
+                                              int &best_white_left,
+                                              int &best_white_right,
+                                              int &best_white_length)
+{
+    best_white_left = -1;
+    best_white_right = -1;
+    best_white_length = 0;
+
+    int col = search_left;
+    while (col <= search_right)
+    {
+        while (col <= search_right && row_ptr[col] != 255)
+        {
+            ++col;
+        }
+        if (col > search_right)
+        {
+            break;
+        }
+
+        const int white_left = col;
+        while (col <= search_right && row_ptr[col] == 255)
+        {
+            ++col;
+        }
+
+        const int white_right = col - 1;
+        const int white_length = white_right - white_left + 1;
+        if (white_length > best_white_length)
+        {
+            best_white_left = white_left;
+            best_white_right = white_right;
+            best_white_length = white_length;
+        }
+    }
+
+    return best_white_length > 0;
+}
+
+static bool measure_track_width_from_row(const uint8 (*image)[image_width], int row,
+                                         int &left_edge, int &right_edge,
+                                         int &center_x, int &track_width)
+{
+    if (row < 0 || row >= image_height)
+    {
+        return false;
+    }
+
+    const int safe_left = valid_l_bound[row];
+    const int safe_right = valid_r_bound[row];
+    if (safe_left > safe_right)
+    {
+        return false;
+    }
+
+    const int search_left = std::max(safe_left + 1, 1);
+    const int search_right = std::min(safe_right - 1, image_width - 2);
+    if (search_left > search_right)
+    {
+        return false;
+    }
+
+    const uint8 *row_ptr = image[row];
+    int best_white_left = -1;
+    int best_white_right = -1;
+    int best_white_length = 0;
+    if (!find_longest_white_segment_in_row(row_ptr, search_left, search_right,
+                                           best_white_left, best_white_right, best_white_length))
+    {
+        return false;
+    }
+
+    const int measured_left = best_white_left - 1;
+    const int measured_right = best_white_right + 1;
+
+    // 贴着有效区边界的候选不要，用来避免把六边形底部的极限边界误当成赛道宽度。
+    if (measured_left <= safe_left || measured_right >= safe_right)
+    {
+        return false;
+    }
+
+    if (row_ptr[measured_left] != 0 || row_ptr[measured_right] != 0)
+    {
+        return false;
+    }
+
+    left_edge = measured_left;
+    right_edge = measured_right;
+    center_x = (measured_left + measured_right) / 2;
+    track_width = measured_right - measured_left;
+    return true;
+}
+
+static void try_init_reference_track_width(const uint8 (*image)[image_width])
+{
+    if (g_track_reference_width_valid || !g_ipm_valid_region_initialized)
+    {
+        return;
+    }
+
+    int streak_left[k_track_width_init_confirm_rows] = {0};
+    int streak_right[k_track_width_init_confirm_rows] = {0};
+    int streak_center[k_track_width_init_confirm_rows] = {0};
+    int streak_width[k_track_width_init_confirm_rows] = {0};
+    int streak_row[k_track_width_init_confirm_rows] = {0};
+    uint8 streak_count = 0;
+
+    int start_row = image_height - 2;
+    if (g_valid_box_bottom_row >= 1)
+    {
+        start_row = g_valid_box_bottom_row - 1;
+    }
+
+    for (int row = start_row; row >= 0; --row)
+    {
+        int left_edge = 0;
+        int right_edge = 0;
+        int center_x = 0;
+        int track_width = 0;
+        if (!measure_track_width_from_row(image, row, left_edge, right_edge, center_x, track_width))
+        {
+            streak_count = 0;
+            continue;
+        }
+
+        if (streak_count > 0)
+        {
+            const bool width_match = abs_int(track_width - streak_width[0]) <= k_track_width_init_width_tolerance;
+            const bool left_match = abs_int(left_edge - streak_left[0]) <= k_track_width_init_edge_tolerance;
+            const bool right_match = abs_int(right_edge - streak_right[0]) <= k_track_width_init_edge_tolerance;
+
+            if (!(width_match && left_match && right_match))
+            {
+                streak_count = 0;
+            }
+        }
+
+        streak_left[streak_count] = left_edge;
+        streak_right[streak_count] = right_edge;
+        streak_center[streak_count] = center_x;
+        streak_width[streak_count] = track_width;
+        streak_row[streak_count] = row;
+        ++streak_count;
+
+        if (streak_count < k_track_width_init_confirm_rows)
+        {
+            continue;
+        }
+
+        int width_sum = 0;
+        int center_sum = 0;
+        for (uint8 i = 0; i < k_track_width_init_confirm_rows; ++i)
+        {
+            width_sum += streak_width[i];
+            center_sum += streak_center[i];
+        }
+
+        g_track_reference_width = static_cast<uint8>(clamp_int(
+            (width_sum + k_track_width_init_confirm_rows / 2) / k_track_width_init_confirm_rows,
+            0, image_width - 1));
+        g_track_reference_center = static_cast<uint8>(clamp_int(
+            (center_sum + k_track_width_init_confirm_rows / 2) / k_track_width_init_confirm_rows,
+            0, image_width - 1));
+        g_track_reference_row = static_cast<uint8>(clamp_int(
+            streak_row[k_track_width_init_confirm_rows / 2], 0, image_height - 1));
+        g_track_reference_width_valid = 1;
+        seed_track_width_reference_profile(g_track_reference_width);
+        return;
+    }
+}
+
+void refresh_copy_image_from_current_camera_image(void)
+{
+    cv::Mat src_mat_320(240, 320, CV_8UC1, rgay_image);
+    cv::Mat src_mat(image_height, image_width, CV_8UC1, copy_image);
+    cv::resize(src_mat_320, src_mat, cv::Size(image_width, image_height), 0, 0, cv::INTER_AREA);
+}
+
+static void build_ipm_gray_frame_from_copy_image(void)
+{
+    cv::Mat src_mat(image_height, image_width, CV_8UC1, copy_image);
+    cv::Mat dst_mat(image_height, image_width, CV_8UC1, ipm_work_array);
+    dst_mat.setTo(k_ipm_invalid_fill_value);
+
+    for (int i = 0; i < image_height; i++)
+    {
+        const int row_left = valid_l_bound[i];
+        const int row_right = valid_r_bound[i];
+        if (row_left > row_right)
+        {
+            continue;
+        }
+
+        for (int j = row_left; j <= row_right; j++)
+        {
+            double mapped_x = 0.0;
+            double mapped_y = 0.0;
+            if (!Transform_Point1(j, i, mapped_x, mapped_y))
+            {
+                continue;
+            }
+
+            const int x = cvRound(mapped_x);
+            const int y = cvRound(mapped_y);
+            if (x >= 0 && x < image_width && y >= 0 && y < image_height)
+            {
+                dst_mat.at<uchar>(i, j) = src_mat.at<uchar>(y, x);
+            }
+        }
+    }
+}
+
+// 输出是二值化+滤波+画框完毕的 bin_image
+static void build_ipm_binary_frame_from_current_camera_image(void)
+{
+    refresh_copy_image_from_current_camera_image();
+    cv::Mat src_mat(image_height, image_width, CV_8UC1, copy_image);
+    Threshold = otsuThreshold(&src_mat.data[0], src_mat.cols, src_mat.rows);
+    build_ipm_gray_frame_from_copy_image();
+
+    turn_to_bin();
+    image_filter(bin_image);
+    draw_valid_region_box(bin_image);
+}
+
+void fill_ipm_debug_image_from_copy_image(uint16 (*img)[image_width], bool big_endian)
+{
+    if (!g_ipm_valid_region_initialized)
+    {
+        init_ipm_valid_region();
+    }
+
+    build_ipm_gray_frame_from_copy_image();
+    dbg_from_gray(img, ipm_work_array, valid_l_bound, valid_r_bound,
+                  k_debug_invalid_fill_color, big_endian);
+
+    const uint16 box_color = big_endian ? swap_rgb565_bytes(RGB565_GREEN) : RGB565_GREEN;
+    for (int row = 0; row < image_height; ++row)
+    {
+        const int row_left = valid_l_bound[row];
+        const int row_right = valid_r_bound[row];
+        if (row_left > row_right)
+        {
+            continue;
+        }
+
+        dbg_point(img, row_left, row, box_color);
+        dbg_point(img, row_right, row, box_color);
+    }
+
+    if (g_valid_box_bottom_row >= 0 && g_valid_box_bottom_left >= 0 &&
+        g_valid_box_bottom_right >= g_valid_box_bottom_left)
+    {
+        dbg_line(img, g_valid_box_bottom_left, g_valid_box_bottom_row,
+                 g_valid_box_bottom_right, g_valid_box_bottom_row, box_color);
+    }
+}
+
+bool init_reference_track_width(uint16 max_attempt_frames)
+{
+    if (!g_ipm_valid_region_initialized)
+    {
+        init_ipm_valid_region();
+    }
+
+    if (max_attempt_frames == 0)
+    {
+        max_attempt_frames = 1;
+    }
+
+    g_track_reference_width_valid = 0;
+    g_track_reference_width = 0;
+    g_track_reference_center = image_width / 2;
+    g_track_reference_row = 0;
+    std::memset(g_track_reference_width_by_row, 0, sizeof(g_track_reference_width_by_row));
+    std::memset(g_track_reference_width_by_row_valid, 0, sizeof(g_track_reference_width_by_row_valid));
+
+    uint8 lost_frame_count = 0;
+    for (uint16 attempt = 0; attempt < max_attempt_frames; ++attempt)
+    {
+        if (uvc_dev.wait_image_refresh() < 0)
+        {
+            ++lost_frame_count;
+            std::cout << "参考赛道宽度初始化时摄像头采集异常，连续丢帧: "
+                      << static_cast<int>(lost_frame_count) << std::endl;
+            if (lost_frame_count >= k_max_lost_frame_count)
+            {
+                return false;
+            }
+            continue;
+        }
+
+        lost_frame_count = 0;
+        rgay_image = uvc_dev.get_gray_image_ptr();
+        build_ipm_binary_frame_from_current_camera_image();
+        try_init_reference_track_width(bin_image);
+
+        if (g_track_reference_width_valid)
+        {
+            std::cout << "参考赛道宽度初始化完成: width="
+                      << static_cast<int>(g_track_reference_width)
+                      << " center=" << static_cast<int>(g_track_reference_center)
+                      << " row=" << static_cast<int>(g_track_reference_row)
+                      << std::endl;
+            return true;
+        }
+    }
+
+    std::cout << "参考赛道宽度初始化失败，未找到稳定赛道宽度" << std::endl;
+    return false;
+}
+
 
 // 这部分代码的目的，是把摄像头原始视角下的赛道图像转换成“近似俯视图”。
 // 原图中由于透视效应，越远的赛道看起来越窄，左右边线会向远处汇聚。
@@ -555,17 +1396,18 @@ static void update_track_lines_from_start_points(void)// 从起始点更新轨�
 //
 // Mat1: 逆透视图坐标 -> 原图坐标
 // Mat2: 原图坐标 -> 逆透视图坐标
-// 当前主流程实际使用的是 Mat1，Mat2 更多是留给调试、画点或验证矩阵用。
+// 主流程做逆向采样时使用 Mat1。
+// 如果后续想把原图里的点、搜线结果或其他标记投到逆透视图上，就使用 Mat2。
 double Mat1[3][3] = {
-    {-0.0290303853733795, 0.0210777262159344, -0.819278828256909},
-    {-0.00144841552112371, 0.00125159250605812, -0.837918472458018},
-    {-2.06916503017672E-05, 0.000275047546694224, -0.0370441101329347},
+    {0.422043010752688, -0.30336595901112, 10.942817755721},
+    {5.07699415451805E-17, 0.0566331219557026, 6.05577612351806},
+    {1.05590374670109E-18, -0.00396792574211929, 0.575709953129308},
 };
 
 double Mat2[3][3] = {
-    {-31.71511450107, -95.6888683012815, 2865.85348720067},
-    {6.25631869614484, -182.337557790208, 3986.01391462335},
-    {0.0641673712425111, -1.30038316933205, 1},
+    {2.36942675159236, 5.49044585987261, -102.789808917197},
+    {-9.55351577492572E-16, 10.1656050955414, -106.929936305732},
+    {-1.09302447655162E-17, 0.0700636942675159, 1},
 };
 
 // src_w / src_h: 输入图像尺寸。这里就是缩放后的算法处理尺寸 160x120。
@@ -577,29 +1419,19 @@ static constexpr int image_h = image_height;// 逆透视输出高度
 
 double Tx = 0;
 double Ty = 0;
-// 把“逆透视结果图”中的点 (x, y) 映射回“原图”中的采样点坐标。
-// 这里使用的是齐次坐标透视变换：
-// [X']   [m00 m01 m02] [x]
-// [Y'] = [m10 m11 m12] [y]
-// [W']   [m20 m21 m22] [1]
-//
-// 最终真实坐标为：
-// X = X' / W'
-// Y = Y' / W'
-//
-// 注意这里的 x、y 不是原图坐标，而是 dst_mat 中的列、行坐标。
-// 经过 Mat1 变换之后，mapped_x、mapped_y 才是输入图 src_mat 里的采样位置。
-bool Transform_Point1(int x, int y, double &mapped_x, double &mapped_y)
+// 通用齐次坐标透视变换。
+// 输入/输出坐标含义由传入的矩阵决定：
+// - Mat1: 逆透视图 -> 原图
+// - Mat2: 原图 -> 逆透视图
+static bool transform_point_with_matrix(const double matrix[3][3],
+                                        int x, int y,
+                                        double &mapped_x, double &mapped_y)
 {
     const double w = 1.0;
-    const double transformedX = Mat1[0][0] * x + Mat1[0][1] * y + Mat1[0][2] * w;
-    const double transformedY = Mat1[1][0] * x + Mat1[1][1] * y + Mat1[1][2] * w;
-    const double transformedW = Mat1[2][0] * x + Mat1[2][1] * y + Mat1[2][2] * w;
+    const double transformedX = matrix[0][0] * x + matrix[0][1] * y + matrix[0][2] * w;
+    const double transformedY = matrix[1][0] * x + matrix[1][1] * y + matrix[1][2] * w;
+    const double transformedW = matrix[2][0] * x + matrix[2][1] * y + matrix[2][2] * w;
 
-    // 透视变换最怕分母接近 0。
-    // 一旦 transformedW 非常接近 0，除法结果会突然变成一个非常大的值，
-    // 通常意味着这个点被映射到了原图很远的位置，已经没有可采样意义。
-    // 这里直接把它记成无效点，后面不会写入 dst_mat。
     if (transformedW > -1e-6 && transformedW < 1e-6)
     {
         mapped_x = -1.0;
@@ -612,10 +1444,31 @@ bool Transform_Point1(int x, int y, double &mapped_x, double &mapped_y)
     return true;
 }
 
+// 把逆透视图中的点映射回原图坐标，供逆向采样使用。
+bool Transform_Point1(int x, int y, double &mapped_x, double &mapped_y)
+{
+    return transform_point_with_matrix(Mat1, x, y, mapped_x, mapped_y);
+}
+
+// 把原图中的点映射到逆透视图坐标，供调试、画点或边线投影使用。
+bool Transform_Point2(int x, int y, double &mapped_x, double &mapped_y)
+{
+    return transform_point_with_matrix(Mat2, x, y, mapped_x, mapped_y);
+}
+
 // 保留原来的两参数接口，兼容旧的调用方式。
 void Transform_Point1(int x, int y)
 {
     if (!Transform_Point1(x, y, Tx, Ty))
+    {
+        Tx = -1.0;
+        Ty = -1.0;
+    }
+}
+
+void Transform_Point2(int x, int y)
+{
+    if (!Transform_Point2(x, y, Tx, Ty))
     {
         Tx = -1.0;
         Ty = -1.0;
@@ -833,7 +1686,6 @@ uint8 otsuThreshold(uint8 *image, uint16 col, uint16 row)
 void turn_to_bin(void)
 {
     // 如果后续需要自动阈值，建议配合有效区版本的大津法一起使用。
-    // Threshold = otsuThreshold(&ipm_image_array[0][0], image_width, image_height);
 
     for (int i = 0; i < image_height; i++)
     {
@@ -968,6 +1820,8 @@ void find_start_point_by_valid_box(uint8 (*image)[image_width])
     start_point_l[1] = 0;
     start_point_r[0] = 0;
     start_point_r[1] = 0;
+    g_left_start_point_fallback_flag = 1;
+    g_right_start_point_fallback_flag = 1;
 
     if (g_valid_box_start_row < 0)
     {
@@ -995,34 +1849,8 @@ void find_start_point_by_valid_box(uint8 (*image)[image_width])
     int best_white_left = -1;
     int best_white_right = -1;
     int best_white_length = 0;
-    int col = search_left;
-    while (col <= search_right)
-    {
-        while (col <= search_right && row_ptr[col] != 255)
-        {
-            ++col;
-        }
-        if (col > search_right)
-        {
-            break;
-        }
-
-        const int white_left = col;
-        while (col <= search_right && row_ptr[col] == 255)
-        {
-            ++col;
-        }
-        const int white_right = col - 1;
-        const int white_length = white_right - white_left + 1;
-        if (white_length > best_white_length)
-        {
-            best_white_left = white_left;
-            best_white_right = white_right;
-            best_white_length = white_length;
-        }
-    }
-
-    if (best_white_length <= 0)
+    if (!find_longest_white_segment_in_row(row_ptr, search_left, search_right,
+                                           best_white_left, best_white_right, best_white_length))
     {
         return;
     }
@@ -1041,6 +1869,7 @@ void find_start_point_by_valid_box(uint8 (*image)[image_width])
         if (row_ptr[black_start] == 0 && row_ptr[black_end] == 0)
         {
             start_point_l[0] = static_cast<uint8>(black_start);
+            g_left_start_point_fallback_flag = 0;
             break;
         }
     }
@@ -1057,9 +1886,226 @@ void find_start_point_by_valid_box(uint8 (*image)[image_width])
         if (row_ptr[black_start] == 0 && row_ptr[black_end] == 0)
         {
             start_point_r[0] = static_cast<uint8>(black_start);
+            g_right_start_point_fallback_flag = 0;
             break;
         }
     }
+}
+
+static bool find_dir_corner_candidate_index(const uint16 points[][2], const uint8 *dirs,
+                                            uint16 point_count, uint8 target_dir,
+                                            bool from_back, uint16 skip_count,
+                                            bool want_left_region, bool want_upper_region,
+                                            uint16 &candidate_index)
+{
+    if (point_count <= k_corner_end_step)
+    {
+        return false;
+    }
+
+    uint16 hit_count = 0;
+    if (!from_back)
+    {
+        for (uint16 i = 0; i < point_count; ++i)
+        {
+            if (dirs[i] != target_dir ||
+                i < k_corner_mid_step ||
+                i + k_corner_mid_step >= point_count)
+            {
+                continue;
+            }
+
+            if (!is_corner_point_in_target_region(points[i][0], points[i][1],
+                                                  want_left_region, want_upper_region))
+            {
+                continue;
+            }
+
+            if (hit_count >= skip_count)
+            {
+                candidate_index = i;
+                return true;
+            }
+            ++hit_count;
+        }
+    }
+    else
+    {
+        for (int i = (int)point_count - 1; i >= 0; --i)
+        {
+            if (dirs[i] != target_dir ||
+                i < k_corner_mid_step ||
+                i + k_corner_mid_step >= point_count)
+            {
+                continue;
+            }
+
+            if (!is_corner_point_in_target_region(points[i][0], points[i][1],
+                                                  want_left_region, want_upper_region))
+            {
+                continue;
+            }
+
+            if (hit_count >= skip_count)
+            {
+                candidate_index = static_cast<uint16>(i);
+                return true;
+            }
+            ++hit_count;
+        }
+    }
+
+    return false;
+}
+
+static bool try_store_left_lower_corner_from_index(uint16 mid_index)
+{
+    if (mid_index < k_corner_mid_step || mid_index + k_corner_mid_step >= g_left_point_count)
+    {
+        return false;
+    }
+
+    const int ax = points_l[mid_index - k_corner_mid_step][0];
+    const int ay = points_l[mid_index - k_corner_mid_step][1];
+    const int bx = points_l[mid_index][0];
+    const int by = points_l[mid_index][1];
+    const int cx = points_l[mid_index + k_corner_mid_step][0];
+    const int cy = points_l[mid_index + k_corner_mid_step][1];
+
+    if (cy <= k_corner_top_guard_row ||
+        !is_corner_point_in_target_region(bx, by, true, false))
+    {
+        return false;
+    }
+
+    const int corner_dot = (ax - bx) * (cx - bx) + (ay - by) * (cy - by);
+    const int corner_balance_x = (cx - bx) + (ax - bx);
+    const int corner_balance_y = (cy - by) + (ay - by);
+
+    if (corner_dot >= 0 &&
+        bx > cx &&
+        by < ay &&
+        corner_balance_x <= 0 &&
+        corner_balance_y >= 0)
+    {
+        store_corner_point(g_left_lower_corner, bx, by);
+        return true;
+    }
+
+    return false;
+}
+
+static bool try_store_right_lower_corner_from_index(uint16 mid_index)
+{
+    if (mid_index < k_corner_mid_step || mid_index + k_corner_mid_step >= g_right_point_count)
+    {
+        return false;
+    }
+
+    const int ax = points_r[mid_index - k_corner_mid_step][0];
+    const int ay = points_r[mid_index - k_corner_mid_step][1];
+    const int bx = points_r[mid_index][0];
+    const int by = points_r[mid_index][1];
+    const int cx = points_r[mid_index + k_corner_mid_step][0];
+    const int cy = points_r[mid_index + k_corner_mid_step][1];
+
+    if (cy <= k_corner_top_guard_row ||
+        !is_corner_point_in_target_region(bx, by, false, false))
+    {
+        return false;
+    }
+
+    const int corner_dot = (ax - bx) * (cx - bx) + (ay - by) * (cy - by);
+    const int corner_balance_x = (cx - bx) + (ax - bx);
+    const int corner_balance_y = (cy - by) + (ay - by);
+
+    if (corner_dot >= 0 &&
+        cx > bx &&
+        by < ay &&
+        corner_balance_x >= 0 &&
+        corner_balance_y >= 0)
+    {
+        store_corner_point(g_right_lower_corner, bx, by);
+        return true;
+    }
+
+    return false;
+}
+
+static bool try_store_left_upper_corner_from_index(uint16 mid_index)
+{
+    if (mid_index < k_corner_mid_step || mid_index + k_corner_mid_step >= g_left_point_count)
+    {
+        return false;
+    }
+
+    const int ax = points_l[mid_index - k_corner_mid_step][0];
+    const int ay = points_l[mid_index - k_corner_mid_step][1];
+    const int bx = points_l[mid_index][0];
+    const int by = points_l[mid_index][1];
+    const int cx = points_l[mid_index + k_corner_mid_step][0];
+    const int cy = points_l[mid_index + k_corner_mid_step][1];
+
+    if (cy <= k_corner_top_guard_row ||
+        !is_corner_point_in_target_region(bx, by, true, true))
+    {
+        return false;
+    }
+
+    const int corner_dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by);
+    const int corner_trend_x = cx - ax;
+    const int corner_trend_y = cy - ay;
+
+    if (corner_dot >= 0 &&
+        bx > ax &&
+        by - cy > k_corner_vertical_delta_min &&
+        ay - by < k_corner_near_flat_delta_max &&
+        corner_trend_x >= 0 &&
+        corner_trend_y <= 0)
+    {
+        store_corner_point(g_left_upper_corner, bx, by);
+        return true;
+    }
+
+    return false;
+}
+
+static bool try_store_right_upper_corner_from_index(uint16 mid_index)
+{
+    if (mid_index < k_corner_mid_step || mid_index + k_corner_mid_step >= g_right_point_count)
+    {
+        return false;
+    }
+
+    const int ax = points_r[mid_index - k_corner_mid_step][0];
+    const int ay = points_r[mid_index - k_corner_mid_step][1];
+    const int bx = points_r[mid_index][0];
+    const int by = points_r[mid_index][1];
+    const int cx = points_r[mid_index + k_corner_mid_step][0];
+    const int cy = points_r[mid_index + k_corner_mid_step][1];
+
+    if (cy <= k_corner_top_guard_row ||
+        !is_corner_point_in_target_region(bx, by, false, true))
+    {
+        return false;
+    }
+
+    const int corner_dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by);
+    const int corner_trend_x = cx - ax;
+    const int corner_trend_y = cy - ay;
+
+    if (corner_dot >= 0 &&
+        ax > bx &&
+        by - cy > k_corner_vertical_delta_min &&
+        ay - by < k_corner_near_flat_delta_max &&
+        corner_trend_x <= 0 &&
+        corner_trend_y <= 0)
+    {
+        store_corner_point(g_right_upper_corner, bx, by);
+        return true;
+    }
+
+    return false;
 }
 
 static void detect_left_lower_corner_point(void)
@@ -1069,36 +2115,19 @@ static void detect_left_lower_corner_point(void)
         return;
     }
 
+    uint16 candidate_index = 0;
+    if (find_dir_corner_candidate_index(points_l, dir_l, g_left_point_count,
+                                        6, true, k_corner_lower_dir_candidate_back_skip,
+                                        true, false, candidate_index) &&
+        try_store_left_lower_corner_from_index(candidate_index))
+    {
+        return;
+    }
+
     for (uint16 i = 0; i + k_corner_end_step < g_left_point_count; ++i)
     {
-        const int ax = points_l[i][0];
-        const int ay = points_l[i][1];
-        const int bx = points_l[i + k_corner_mid_step][0];
-        const int by = points_l[i + k_corner_mid_step][1];
-        const int cx = points_l[i + k_corner_end_step][0];
-        const int cy = points_l[i + k_corner_end_step][1];
-
-        if (cy <= k_corner_top_guard_row)
+        if (try_store_left_lower_corner_from_index(i + k_corner_mid_step))
         {
-            continue;
-        }
-
-        if (!is_corner_point_in_target_region(bx, by, true, false))
-        {
-            continue;
-        }
-
-        const int corner_dot = (ax - bx) * (cx - bx) + (ay - by) * (cy - by);
-        const int corner_balance_x = (cx - bx) + (ax - bx);
-        const int corner_balance_y = (cy - by) + (ay - by);
-
-        if (corner_dot >= 0 &&
-            bx > cx &&
-            by < ay &&
-            corner_balance_x <= 0 &&
-            corner_balance_y >= 0)
-        {
-            store_corner_point(g_left_lower_corner, bx, by);
             return;
         }
     }
@@ -1111,36 +2140,19 @@ static void detect_right_lower_corner_point(void)
         return;
     }
 
+    uint16 candidate_index = 0;
+    if (find_dir_corner_candidate_index(points_r, dir_r, g_right_point_count,
+                                        6, true, k_corner_lower_dir_candidate_back_skip,
+                                        false, false, candidate_index) &&
+        try_store_right_lower_corner_from_index(candidate_index))
+    {
+        return;
+    }
+
     for (uint16 i = 0; i + k_corner_end_step < g_right_point_count; ++i)
     {
-        const int ax = points_r[i][0];
-        const int ay = points_r[i][1];
-        const int bx = points_r[i + k_corner_mid_step][0];
-        const int by = points_r[i + k_corner_mid_step][1];
-        const int cx = points_r[i + k_corner_end_step][0];
-        const int cy = points_r[i + k_corner_end_step][1];
-
-        if (cy <= k_corner_top_guard_row)
+        if (try_store_right_lower_corner_from_index(i + k_corner_mid_step))
         {
-            continue;
-        }
-
-        if (!is_corner_point_in_target_region(bx, by, false, false))
-        {
-            continue;
-        }
-
-        const int corner_dot = (ax - bx) * (cx - bx) + (ay - by) * (cy - by);
-        const int corner_balance_x = (cx - bx) + (ax - bx);
-        const int corner_balance_y = (cy - by) + (ay - by);
-
-        if (corner_dot >= 0 &&
-            cx > bx &&
-            by < ay &&
-            corner_balance_x >= 0 &&
-            corner_balance_y >= 0)
-        {
-            store_corner_point(g_right_lower_corner, bx, by);
             return;
         }
     }
@@ -1153,37 +2165,19 @@ static void detect_left_upper_corner_point(void)
         return;
     }
 
+    uint16 candidate_index = 0;
+    if (find_dir_corner_candidate_index(points_l, dir_l, g_left_point_count,
+                                        2, false, k_corner_upper_dir_candidate_skip,
+                                        true, true, candidate_index) &&
+        try_store_left_upper_corner_from_index(candidate_index))
+    {
+        return;
+    }
+
     for (uint16 i = k_corner_upper_scan_start; i + k_corner_end_step < g_left_point_count; ++i)
     {
-        const int ax = points_l[i][0];
-        const int ay = points_l[i][1];
-        const int bx = points_l[i + k_corner_mid_step][0];
-        const int by = points_l[i + k_corner_mid_step][1];
-        const int cx = points_l[i + k_corner_end_step][0];
-        const int cy = points_l[i + k_corner_end_step][1];
-
-        if (cy <= k_corner_top_guard_row)
+        if (try_store_left_upper_corner_from_index(i + k_corner_mid_step))
         {
-            continue;
-        }
-
-        if (!is_corner_point_in_target_region(bx, by, true, true))
-        {
-            continue;
-        }
-
-        const int corner_dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by);
-        const int corner_trend_x = cx - ax;
-        const int corner_trend_y = cy - ay;
-
-        if (corner_dot >= 0 &&
-            bx > ax &&
-            by - cy > k_corner_vertical_delta_min &&
-            ay - by < k_corner_near_flat_delta_max &&
-            corner_trend_x >= 0 &&
-            corner_trend_y <= 0)
-        {
-            store_corner_point(g_left_upper_corner, bx, by);
             return;
         }
     }
@@ -1196,37 +2190,19 @@ static void detect_right_upper_corner_point(void)
         return;
     }
 
+    uint16 candidate_index = 0;
+    if (find_dir_corner_candidate_index(points_r, dir_r, g_right_point_count,
+                                        2, false, k_corner_upper_dir_candidate_skip,
+                                        false, true, candidate_index) &&
+        try_store_right_upper_corner_from_index(candidate_index))
+    {
+        return;
+    }
+
     for (uint16 i = k_corner_upper_scan_start; i + k_corner_end_step < g_right_point_count; ++i)
     {
-        const int ax = points_r[i][0];
-        const int ay = points_r[i][1];
-        const int bx = points_r[i + k_corner_mid_step][0];
-        const int by = points_r[i + k_corner_mid_step][1];
-        const int cx = points_r[i + k_corner_end_step][0];
-        const int cy = points_r[i + k_corner_end_step][1];
-
-        if (cy <= k_corner_top_guard_row)
+        if (try_store_right_upper_corner_from_index(i + k_corner_mid_step))
         {
-            continue;
-        }
-
-        if (!is_corner_point_in_target_region(bx, by, false, true))
-        {
-            continue;
-        }
-
-        const int corner_dot = (bx - ax) * (cx - bx) + (by - ay) * (cy - by);
-        const int corner_trend_x = cx - ax;
-        const int corner_trend_y = cy - ay;
-
-        if (corner_dot >= 0 &&
-            ax > bx &&
-            by - cy > k_corner_vertical_delta_min &&
-            ay - by < k_corner_near_flat_delta_max &&
-            corner_trend_x <= 0 &&
-            corner_trend_y <= 0)
-        {
-            store_corner_point(g_right_upper_corner, bx, by);
             return;
         }
     }
@@ -1241,252 +2217,210 @@ void detect_track_corner_points(void)
     detect_right_upper_corner_point();
 }
 
-static void fill_debug_image(void)
-{
-    std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
-
-    // 灰度底图直接产出大端序 RGB565，与后面叠加标记的字节序一致，
-    // 省去整帧 19200 像素的独立字节交换遍历。
-    dbg_from_gray(debug_image, bin_image, valid_l_bound, valid_r_bound,
-                  k_debug_invalid_fill_color, true);
-
-    // 叠加标记颜色在写入前交换一次字节序，与底图大端序对齐。
-    dbg_cross(debug_image, start_point_l[0], start_point_l[1],
-              swap_rgb565_bytes(RGB565_GREEN), 2);
-    dbg_cross(debug_image, start_point_r[0], start_point_r[1],
-              swap_rgb565_bytes(RGB565_BLUE), 2);
-    dbg_trace_points(debug_image, points_l, g_left_point_count,
-                     swap_rgb565_bytes(RGB565_RED), 1);
-    dbg_trace_points(debug_image, points_r, g_right_point_count,
-                     swap_rgb565_bytes(RGB565_BLUE), 1);
-
-    if (g_left_upper_corner.flag)
-    {
-        dbg_cross(debug_image, g_left_upper_corner.col, g_left_upper_corner.row,
-                  swap_rgb565_bytes(RGB565_YELLOW), 2);
-    }
-
-    if (g_right_upper_corner.flag)
-    {
-        dbg_cross(debug_image, g_right_upper_corner.col, g_right_upper_corner.row,
-                  swap_rgb565_bytes(RGB565_CYAN), 2);
-    }
-
-    if (g_left_lower_corner.flag)
-    {
-        dbg_cross(debug_image, g_left_lower_corner.col, g_left_lower_corner.row,
-                  swap_rgb565_bytes(RGB565_MAGENTA), 2);
-    }
-
-    if (g_right_lower_corner.flag)
-    {
-        dbg_cross(debug_image, g_right_lower_corner.col, g_right_lower_corner.row,
-                  swap_rgb565_bytes(RGB565_BROWN), 2);
-    }
-}
-
 //=======================================================测试元素
 uint8_t line_lost = 0; // 0都不丢线，1左边丢线，2右边丢线，3都丢线
 #define k_lost_line_ratio_num 1//丢线阈值分子
 #define k_lost_line_ratio_den 7
+
+uint8_t g_left_ring_yaw_recording_flag = 0; // 左环累计角是否正在记录
+float g_left_ring_enter_unbounded_yaw = 0.0f; // 左环进入时记录的连续 yaw
+float g_left_ring_progress_yaw = 0.0f; // 左环累计角，左转时递增
+
+uint8_t mode_element = 0; // 0正常模式，1十字，2左圆环；
+uint8_t left_ring_process_mode = 0;//0未进入左圆环
+static uint8_t g_left_ring_ready_for_inside_flag = 0; // 左环第一段内，是否已经满足进入第二段前的预备条件
 // // 辅助函数
+
+static void start_left_ring_yaw_tracking(void)
+{
+    g_left_ring_enter_unbounded_yaw = yaw_tracker.get_unbounded_yaw();
+    g_left_ring_progress_yaw = 0.0f;
+    g_left_ring_yaw_recording_flag = 1;
+}
+
+static void stop_left_ring_yaw_tracking(void)
+{
+    g_left_ring_yaw_recording_flag = 0;
+    g_left_ring_enter_unbounded_yaw = 0.0f;
+    g_left_ring_progress_yaw = 0.0f;
+}
+
+static void update_left_ring_yaw_tracking(void)// 这个函数需要在每一帧都调用，才能正确累计角度。
+{
+    if (!g_left_ring_yaw_recording_flag)
+    {
+        return;
+    }
+
+    g_left_ring_progress_yaw =
+        g_left_ring_enter_unbounded_yaw - yaw_tracker.get_unbounded_yaw();
+}
 
 void lost_line_check(void)
 {
-    int16 left_overlap_count = 0; // 左边丢线点数
-        uint16 right_overlap_count = 0;
-        float left_overlap_ratio = 0.0f;//
-        float right_overlap_ratio = 0.0f;
+    uint16 left_valid_point_count = 0;
+    uint16 right_valid_point_count = 0;
+    const uint16 left_overlap_count = count_boundary_overlap_points(points_l, g_left_point_count,
+                                                                    true, left_valid_point_count);
+    const uint16 right_overlap_count = count_boundary_overlap_points(points_r, g_right_point_count,
+                                                                     false, right_valid_point_count);
+    float left_overlap_ratio = 0.0f;
+    float right_overlap_ratio = 0.0f;
 
-        uint8 left_lost = 0;
-        uint8 right_lost = 0;
+    uint8 left_lost = 0;
+    uint8 right_lost = 0;
 
-       line_lost = 0;
+    line_lost = 0;
 
-        if (g_left_point_count == 0)
+    if (g_left_point_count == 0 || left_valid_point_count == 0)
+    {
+        left_lost = 1;
+    }
+    else
+    {
+        left_overlap_ratio = static_cast<float>(left_overlap_count) /
+                             static_cast<float>(left_valid_point_count);
+
+        if (left_overlap_count * k_lost_line_ratio_den >
+            left_valid_point_count * k_lost_line_ratio_num)
         {
             left_lost = 1;
         }
-        else
-        {
-            for (uint16 i = 0; i < g_left_point_count && i < k_max_search_points; ++i)
-            {
-                const int x = points_l[i][0];
-                const int y = points_l[i][1];
+    }
 
-                if (y < 0 || y >= image_height)
-                {
-                    continue;
-                }
+    if (g_right_point_count == 0 || right_valid_point_count == 0)
+    {
+        right_lost = 1;
+    }
+    else
+    {
+        right_overlap_ratio = static_cast<float>(right_overlap_count) /
+                              static_cast<float>(right_valid_point_count);
 
-                if (valid_l_bound[y] > valid_r_bound[y])
-                {
-                    continue;
-                }
-
-                if (x == valid_l_bound[y])
-                {
-                    ++left_overlap_count;
-                }
-            }
-
-            left_overlap_ratio = static_cast<float>(left_overlap_count) /
-                                 static_cast<float>(g_left_point_count);
-
-            if (left_overlap_count * k_lost_line_ratio_den >
-                g_left_point_count * k_lost_line_ratio_num)
-            {
-                left_lost = 1;
-            }
-        }
-
-        if (g_right_point_count == 0)
+        if (right_overlap_count * k_lost_line_ratio_den >
+            right_valid_point_count * k_lost_line_ratio_num)
         {
             right_lost = 1;
         }
-        else
-        {
-            for (uint16 i = 0; i < g_right_point_count && i < k_max_search_points; ++i)
-            {
-                const int x = points_r[i][0];
-                const int y = points_r[i][1];
+    }
 
-                if (y < 0 || y >= image_height)
-                {
-                    continue;
-                }
+    test3 = left_overlap_ratio;
+    test4 = right_overlap_ratio;
 
-                if (valid_l_bound[y] > valid_r_bound[y])
-                {
-                    continue;
-                }
+    if (left_lost && right_lost)
+    {
+        line_lost = 3;
+    }
+    else if (left_lost)
+    {
+        line_lost = 1;
+    }
+    else if (right_lost)
+    {
+        line_lost = 2;
+    }
+}
 
-                if (x == valid_r_bound[y])
-                {
-                    ++right_overlap_count;
-                }
-            }
+void left_ring_process()
+{
+    //update_left_ring_yaw_tracking();
 
-            right_overlap_ratio = static_cast<float>(right_overlap_count) /
-                                  static_cast<float>(g_right_point_count);
+    if (left_ring_process_mode==1)
+    {
+       update_mid_line_by_track_mode(2);
+       // 在这个时候记录yaw值，辅助进环出环
+       //右边巡线
+    }
+    if (left_ring_process_mode==2)
+    {
+       // start_left_ring_yaw_tracking();
+        update_left_ring_yaw_tracking();
+        update_mid_line_by_track_mode(1);
+        //进行左边巡线
+        //并且将将左上拐点到右下起始点的线段拟合成圆弧，记录圆心坐标和半径，辅助进环出环（我是怕左边线过度爬）
+    }
+    if (left_ring_process_mode==3)
+    {
+        update_left_ring_yaw_tracking();
+        update_mid_line_by_track_mode(2);
+        // 左环第三段切回右边巡线，等待后续补充出环判据
+    }
+}
 
-            if (right_overlap_count * k_lost_line_ratio_den >
-                g_right_point_count * k_lost_line_ratio_num)
-            {
-                right_lost = 1;
-            }
-        }
+static bool is_left_upper_corner_ready_for_ring_inside(void)
+{
+    if (!g_left_upper_corner.flag)
+    {
+        return false;
+    }
 
-        test3 = left_overlap_ratio;
-        test4 = right_overlap_ratio;
+    const int corner_row = static_cast<int>(g_left_upper_corner.row);
+    return corner_row >= k_left_ring_inside_ready_min_row &&
+           corner_row <= k_left_ring_inside_ready_max_row;
+}
 
-        if (left_lost && right_lost)
-        {
-            line_lost = 3;
-        }
-        else if (left_lost)
-        {
-            line_lost = 1;
-        }
-        else if (right_lost)
-        {
-            line_lost = 2;
-        }
+static void draw_left_ring_ready_region_box(uint16 (*img)[image_width])
+{
+    const int prepare_row = clamp_int(k_left_ring_prepare_max_row, 0, image_height - 1);
+    const int inside_ready_min_row = clamp_int(k_left_ring_inside_ready_min_row, 0, image_height - 1);
+    const int inside_ready_max_row = clamp_int(k_left_ring_inside_ready_max_row, 0, image_height - 1);
+    const uint16 prepare_color = swap_rgb565_bytes(RGB565_YELLOW);
+    const uint16 inside_ready_color = swap_rgb565_bytes(RGB565_GREEN);
+
+    dbg_line(img, 0, prepare_row, image_width - 1, prepare_row, prepare_color);
+    dbg_line(img, 0, inside_ready_min_row, image_width - 1, inside_ready_min_row, inside_ready_color);
+    dbg_line(img, 0, inside_ready_max_row, image_width - 1, inside_ready_max_row, inside_ready_color);
 }
 
 void track_element_update(void)
 {
     lost_line_check();
     detect_track_corner_points();
-}
+    detect_track_long_straight_features();
 
-    //===========================================================================
-    void image_process(void)
-{
-    if (!g_ipm_valid_region_initialized)
+    if (mode_element != 2 && g_left_ring_yaw_recording_flag)
     {
-        init_ipm_valid_region();
+        stop_left_ring_yaw_tracking();
     }
 
-    static uint8 lost_frame_count = 0;
-
-    // 阻塞式等待摄像头完成新一帧图像的采集刷新，返回<0表示采集失败/异常
-    if (uvc_dev.wait_image_refresh() < 0)
+    if (mode_element==0)
     {
-        lost_frame_count++;
-        std::cout << "摄像头采集异常，连续丢帧: " << static_cast<int>(lost_frame_count) << std::endl;
-        if (lost_frame_count >= k_max_lost_frame_count)
-        {
-            std::cout << "摄像头连续多次丢帧，程序退出" << std::endl;
-            exit(0);
-        }
-        return;
-    }
-    lost_frame_count = 0;
-
-    // 获取摄像头采集到的灰度图像数据指针
-    rgay_image = uvc_dev.get_gray_image_ptr();
-    // memcpy(copy_image, rgay_image, image_width * image_height * sizeof(uint8));
-    //  (零拷贝，直接在原始数据上构建 Mat 对象)
-    //  参数含义：高120, 宽160, 8位无符号单通道(灰度图), 数组首地址
-    //  直接零拷贝包装原图（作为只读的 src）
-    cv::Mat src_mat_320(240, 320, CV_8UC1, rgay_image);
-    cv::Mat src_mat(src_h, src_w, CV_8UC1, copy_image);
-    // 给输出数组也“穿上” cv::Mat 的外衣。
-    cv::Mat dst_mat(image_h, image_w, CV_8UC1, ipm_work_array);
-    cv::resize(src_mat_320, src_mat, cv::Size(src_w, src_h), 0, 0, cv::INTER_AREA);
-    Threshold = otsuThreshold(&src_mat.data[0], src_mat.cols, src_mat.rows);
-    //test2 = Threshold;
-    dst_mat.setTo(k_ipm_invalid_fill_value);
-
-    for (int i = 0; i < image_h; i++)
-    {
-        const int row_left = valid_l_bound[i];
-        const int row_right = valid_r_bound[i];
-        if (row_left > row_right)
-        {
-            continue;
-        }
-
-        for (int j = row_left; j <= row_right; j++)
-        {
-            // 把逆透视图中的点 (j, i) 映射回原图坐标。
-            double mapped_x = 0.0;
-            double mapped_y = 0.0;
-            if (!Transform_Point1(j, i, mapped_x, mapped_y))
+        {//左圆环识别
+            if (line_lost == 1 && g_right_long_straight_flag == 1 && g_left_lower_corner.flag == 1 && g_left_upper_corner.flag == 0)
             {
-                continue;
+                mode_element = 2;//判定为左圆环
+                left_ring_process_mode = 1;
+                g_left_ring_ready_for_inside_flag = 0;
+                
             }
-            // 这里直接四舍五入到最近整数像素，相当于做最邻近采样。
-            // 如果后续想让逆透视图更平滑，可以改成双线性插值。
-            const int x = cvRound(mapped_x);
-            const int y = cvRound(mapped_y);
-            // 不是所有 dst_mat 中的点都能在输入图中找到合法位置。
-            // 逆透视后常见情况是：
-            // - 底部左右两侧会映射到原图外
-            // - 靠近无穷远方向的点会被拉到极端位置
-            // 所以写入前一定要做越界判断。
-            if (x >= 0 && x < src_w && y >= 0 && y < src_h)
+        }
+        
+    }
+    if (mode_element == 2)
+    {
+        if (left_ring_process_mode == 1)
+        {
+            if (g_left_upper_corner.flag &&
+                g_left_upper_corner.row <= k_left_ring_prepare_max_row &&
+                g_left_lower_corner.flag == 0)
             {
-                dst_mat.at<uchar>(i, j) = src_mat.at<uchar>(y, x);
+                g_left_ring_ready_for_inside_flag = 1;
+            }
+
+            if (g_left_ring_ready_for_inside_flag &&
+                is_left_upper_corner_ready_for_ring_inside())
+            {
+                left_ring_process_mode = 2;
+                start_left_ring_yaw_tracking();
+            }
+        }
+        else if (left_ring_process_mode == 2)
+        {
+            if (g_left_ring_progress_yaw >= k_left_ring_exit_switch_yaw)
+            {
+                left_ring_process_mode = 3;
             }
         }
     }
-
-    // 旧的灰度 TCP 图传接口，先保留注释以便回退。
-    // {
-    //     std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
-    //     std::memcpy(ipm_image_array, ipm_work_array, sizeof(ipm_image_array));
-    // }
-
-    turn_to_bin();    
-    image_filter(bin_image);
-    draw_valid_region_box(bin_image);
-    find_start_point_by_valid_box(bin_image);
-    update_track_lines_from_start_points();
-    track_element_update();
-    fill_debug_image();
-    // test1 = g_left_point_count;
-    // test2 = g_right_point_count;
-    test1= line_lost;
+    left_ring_process();
 }

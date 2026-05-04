@@ -110,6 +110,36 @@ void dbg_line(uint16 (*img)[image_width], int x1, int y1, int x2, int y2, uint16
 void dbg_circle(uint16 (*img)[image_width], int cx, int cy, int r, uint16 color);
 
 //-------------------------------------------------------------------------------------------------------------------
+// 函数简介     显示单个 6x8 ASCII 字符
+// 参数说明     img             目标 RGB565 图像数组指针
+// 参数说明     x               字符左上角 x 坐标
+// 参数说明     y               字符左上角 y 坐标
+// 参数说明     ch              ASCII 字符，超出可显示范围时自动替换为 '?'
+// 参数说明     color           前景色
+// 参数说明     bg_color        背景色
+// 参数说明     transparent_bg  true=背景透明，仅绘制前景；false=前景/背景都写入
+// 返回参数     void
+// 使用示例     dbg_char_6x8(debug_image, 2, 2, 'A', RGB565_WHITE, RGB565_BLACK, false);
+//-------------------------------------------------------------------------------------------------------------------
+void dbg_char_6x8(uint16 (*img)[image_width], int x, int y, char ch,
+                  uint16 color, uint16 bg_color, bool transparent_bg = false);
+
+//-------------------------------------------------------------------------------------------------------------------
+// 函数简介     显示 6x8 ASCII 字符串，支持 '\n' 换行
+// 参数说明     img             目标 RGB565 图像数组指针
+// 参数说明     x               字符串左上角 x 坐标
+// 参数说明     y               字符串左上角 y 坐标
+// 参数说明     text            以 '\0' 结尾的 ASCII 字符串
+// 参数说明     color           前景色
+// 参数说明     bg_color        背景色
+// 参数说明     transparent_bg  true=背景透明，仅绘制前景；false=前景/背景都写入
+// 返回参数     void
+// 使用示例     dbg_text_6x8(debug_image, 2, 2, "CIPM>20", RGB565_WHITE, RGB565_BLACK, false);
+//-------------------------------------------------------------------------------------------------------------------
+void dbg_text_6x8(uint16 (*img)[image_width], int x, int y, const char *text,
+                  uint16 color, uint16 bg_color, bool transparent_bg = false);
+
+//-------------------------------------------------------------------------------------------------------------------
 // 函数简介     离散点轨迹描点
 // 参数说明     img             目标 RGB565 图像数组指针
 // 参数说明     points          点坐标数组，每个元素为 {x, y}
@@ -133,7 +163,7 @@ void dbg_trace_points(uint16 (*img)[image_width],
 // 参数说明     invalid_color   无效区填充颜色（RGB565）
 // 参数说明     big_endian      true 时产出大端序 RGB565（逐飞 SCC8660 图传链路专用），默认 false
 // 返回参数     void
-// 使用示例     dbg_from_gray(debug_image, ipm_image_array, valid_l_bound, valid_r_bound, 0x000F, true);
+// 使用示例     dbg_from_gray(debug_image, bin_image, valid_l_bound, valid_r_bound, 0x000F, true);
 // 备注信息     有效区内灰度→RGB565 转换；无效区用 invalid_color 填充；必须先调用再叠加其他调试标记
 //-------------------------------------------------------------------------------------------------------------------
 void dbg_from_gray(uint16 (*dst)[image_width],

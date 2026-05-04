@@ -7,10 +7,15 @@ TrackInfo g_track_info;
 namespace
 {
     // 基础目标车速配置
-    constexpr float k_speed_straight = 150.0f;
-    constexpr float k_speed_curve = 125.0f;
-    constexpr float k_speed_sharp = 110.0f;
-    constexpr float k_speed_lost = 90.0f;
+    // constexpr float k_speed_straight = 150.0f;
+    // constexpr float k_speed_curve = 125.0f;
+    // constexpr float k_speed_sharp = 110.0f;
+    // constexpr float k_speed_lost = 90.0f;
+
+    constexpr float k_speed_straight = 30.0f;
+    constexpr float k_speed_curve = 20.0f;
+    constexpr float k_speed_sharp = 20.0f;
+    constexpr float k_speed_lost = 20.0f;
 
     // 加减速步长限制（非对称平滑）
     constexpr float k_speed_up_step = 3.0f;
@@ -19,7 +24,7 @@ namespace
 
 float calc_base_speed(const TrackInfo &info)
 {
-    static float base_speed = 140.0f; // 初始起步速度
+    static float base_speed = 20.0f; // 初始起步速度
 
     float target = k_speed_straight;
 

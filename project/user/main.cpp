@@ -1,5 +1,6 @@
 #include "zf_common_headfile.hpp"
 #include "main.hpp"
+#include "image.hpp"
 #include <iostream>
 #include "IPM_image.hpp"
 #include "scheduler.hpp" // 引入中央调度器
@@ -34,18 +35,17 @@ int main(int, char **)
     // esc_init();
     // esc_set_speed_percent(0);
 
-    // imu_init();
-    // Encoder_Init();
-    // motor_init();
+     imu_init();
+     Encoder_Init();
+     motor_init();
 
-    init_ipm_valid_region(); // 预先计算逆透视有效区域边界，供后续处理使用
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
         //    //tcp_bind_variables(&target_yaw, &yaw);
         //    //tcp_bind_variables(&speed1, &speed2);
         // }
 
-        if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
+    if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
     {
         return -1;
     }
@@ -61,33 +61,28 @@ int main(int, char **)
     signal(SIGINT, sigint_handler);
     keyboard_init_simple();// 初始化简单键盘输入，供调试用
 
-    // 启动中央大脑！全车所有模块开始按时间片同步运转
-    scheduler_init();
     uvc_dev.set_auto_exposure(1); // 关闭自动曝光，进入手动模式，才能设置曝光值
     uvc_dev.set_exposure_value(100); // 设置初始曝光值
+
+    // 启动中央大脑！全车所有模块开始按时间片同步运转
+    scheduler_init();
+
     while (1)
     {
 
-        //keyboard_poll_simple();// 轮询键盘输入，供调试用
+        keyboard_poll_simple();// 轮询键盘输入，供调试用
        // esc_set_speed_percent(test1);
         //image_test();
         image_process();
-        // motor_set_speed(0, 0);
+         //motor_set_speed(30, 30);
         if (need_print.load() == 1)
         {
-            static int count = 0;
-            if(++count==5)
-            {
-                count = 0;
-            }
-            std::cout << " test3: " << test3
-                      << " test4: " << test4
-                      << " test1: " << test1
+            std::cout << "mode_state: " << static_cast<int>(mode_state)
+                      << "  left_ring_process_state: " << static_cast<int>(left_ring_process_state)
+                      << "  rec=" << static_cast<int>(g_front_left_ring_yaw_recording_flag)
+                      << "  yaw=" << g_front_left_ring_progress_yaw
                       << std::endl;
-
-            // std::cout << "pwm_l: " << pwm_l << " pwm_r: " << pwm_r << std::endl;
-            //  std::cout << "speed1: " << speed1 << " speed2: " << speed2 << "  yaw: " << yaw <<  std::endl;
-             need_print.store(0);
+            need_print.store(0);
         }
         system_delay_ms(10);
     }
@@ -167,15 +162,21 @@ void keyboard_poll_simple()
         {
         case 'a':
         case 'A':
-            //test1 += 10.0f;
-           // std::cout << "test1: " << test1 << std::endl;
+            toggle_front_debug_display_mode();
+            std::cout << "调试图显示模式切换为 " << get_front_debug_display_mode_name() << std::endl;
             break;
 
         case 'b':
         case 'B':
-            key_mode = (key_mode + 1) % 3; // 切换模式
-             std::cout << "切换到模式 " << key_mode << std::endl;
+        {
+            const uint8 next_mode =
+                static_cast<uint8>((get_front_track_side_control_mode() + 1) %
+                                   (FrontTrackSideControlNone + 1));
+            set_front_track_side_control_mode(next_mode);
+            std::cout << "巡线控制模式切换为 "
+                      << get_front_track_side_control_mode_name() << std::endl;
             break;
+        }
 
         // case 'r':
         // case 'R':

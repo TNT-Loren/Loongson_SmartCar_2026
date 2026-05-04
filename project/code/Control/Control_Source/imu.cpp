@@ -61,7 +61,7 @@ void YawTracker::init()
     printf("校准完美结束！共采集 %d 帧，Z轴高精度零偏: %.4f DPS\n", sample_count, gyro_z_bias);
 }
 
-    void YawTracker::update(float dt)
+void YawTracker::update(float dt)
 {
     // 获取原始数据并转换
     float raw_z = (float)imu_dev.get_gyro_z();
@@ -82,6 +82,16 @@ void YawTracker::init()
 
     // 更新历史
     last_gyro_z_dps = current_dps;
+}
+
+float YawTracker::get_yaw() const
+{
+    return yaw;
+}
+
+float YawTracker::get_unbounded_yaw() const
+{
+    return unbounded_yaw;
 }
 
 // =================== C 风格包装函数实现 ===================

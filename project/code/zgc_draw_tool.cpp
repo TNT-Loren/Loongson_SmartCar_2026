@@ -1,5 +1,7 @@
 #include "zgc_draw_tool.hpp"
 
+#include "zf_common_font.hpp"
+
 // ---- 内部工具函数，仅本文件可见 ----
 
 // 返回两整数中较小值
@@ -207,6 +209,83 @@ void dbg_circle(uint16 (*img)[image_width], int cx, int cy, int r, uint16 color)
 }
 
 //=====================================================================================================================
+// 函数简介     显示单个 6x8 ASCII 字符
+// 参数说明     img             目标 RGB565 图像数组指针
+// 参数说明     x               字符左上角 x 坐标
+// 参数说明     y               字符左上角 y 坐标
+// 参数说明     ch              ASCII 字符，超出可显示范围时自动替换为 '?'
+// 参数说明     color           前景色
+// 参数说明     bg_color        背景色
+// 参数说明     transparent_bg  true=背景透明，仅绘制前景；false=前景/背景都写入
+// 返回参数     void
+//=====================================================================================================================
+void dbg_char_6x8(uint16 (*img)[image_width], int x, int y, char ch,
+                  uint16 color, uint16 bg_color, bool transparent_bg)
+{
+    unsigned char glyph = static_cast<unsigned char>(ch);
+    // 控制字符和不可显示字符统一替换为 '?'
+    if (glyph < 32 || glyph > 127)
+    {
+        glyph = static_cast<unsigned char>('?');
+    }
+
+    // ascii_font_6x8 是逐飞 SDK 内置的 6x8 点阵字模，索引 0 对应空格(32)
+    // 每个字模为 6 字节，每字节 8 位对应一列的 8 个像素行
+    const uint8 *font = ascii_font_6x8[glyph - 32];
+    for (int col = 0; col < 6; ++col) // 遍历 6 列
+    {
+        uint8 bits = font[col]; // 当前列的 8 行位图
+        for (int row = 0; row < 8; ++row) // 遍历 8 行（从下往上）
+        {
+            if (bits & 0x01) // 该位为 1 → 画前景色
+            {
+                dbg_point(img, x + col, y + row, color);
+            }
+            else if (!transparent_bg) // 该位为 0 且不透明 → 画背景色
+            {
+                dbg_point(img, x + col, y + row, bg_color);
+            }
+            bits >>= 1; // 移到下一行(下一bit)
+        }
+    }
+}
+
+//=====================================================================================================================
+// 函数简介     显示 6x8 ASCII 字符串，支持 '\n' 换行
+// 参数说明     img             目标 RGB565 图像数组指针
+// 参数说明     x               字符串左上角 x 坐标
+// 参数说明     y               字符串左上角 y 坐标
+// 参数说明     text            以 '\0' 结尾的 ASCII 字符串
+// 参数说明     color           前景色
+// 参数说明     bg_color        背景色
+// 参数说明     transparent_bg  true=背景透明，仅绘制前景；false=前景/背景都写入
+// 返回参数     void
+//=====================================================================================================================
+void dbg_text_6x8(uint16 (*img)[image_width], int x, int y, const char *text,
+                  uint16 color, uint16 bg_color, bool transparent_bg)
+{
+    if (text == nullptr)
+    {
+        return;
+    }
+
+    const int origin_x = x; // 换行时回到此行头
+    for (const char *p = text; *p != '\0'; ++p)
+    {
+        if (*p == '\n') // 换行：x 归原位，y 下跳一个字符高度
+        {
+            x = origin_x;
+            y += 8;
+            continue;
+        }
+
+        // 画当前字符，x 右移 6 像素（字符宽）留给下一个字符
+        dbg_char_6x8(img, x, y, *p, color, bg_color, transparent_bg);
+        x += 6;
+    }
+}
+
+//=====================================================================================================================
 // 函数简介     离散点轨迹描点
 // 参数说明     img             目标 RGB565 图像数组指针
 // 参数说明     points          点坐标数组，每个元素为 {x, y}，x 在前 y 在后
@@ -243,7 +322,7 @@ void dbg_trace_points(uint16 (*img)[image_width],
 // 参数说明     invalid_color   无效区填充颜色（RGB565），内部按 big_endian 决定是否交换字节
 // 参数说明     big_endian      true 时产出大端序 RGB565（逐飞 SCC8660 图传链路专用）
 // 返回参数     void
-// 使用示例     dbg_from_gray(debug_image, ipm_image_array, valid_l_bound, valid_r_bound, 0x000F, true);
+// 使用示例     dbg_from_gray(debug_image, bin_image, valid_l_bound, valid_r_bound, 0x000F, true);
 // 备注信息     有效区内做灰度→RGB565 转换；无效区用 invalid_color 统一填充；
 //              big_endian=true 时省去调用方再做整帧字节交换的开销
 //=====================================================================================================================
