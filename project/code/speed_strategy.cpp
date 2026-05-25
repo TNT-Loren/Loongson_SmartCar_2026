@@ -12,14 +12,15 @@ namespace
     // constexpr float k_speed_sharp = 110.0f;
     // constexpr float k_speed_lost = 90.0f;
 
-    constexpr float k_speed_straight = 30.0f;
-    constexpr float k_speed_curve = 20.0f;
-    constexpr float k_speed_sharp = 20.0f;
-    constexpr float k_speed_lost = 20.0f;
+    constexpr float k_speed_straight = 65.0f;
+    constexpr float k_speed_curve = 55.0f;
+    constexpr float k_speed_sharp = 55.0f;
+    constexpr float k_speed_circle = 37.0f;
+    constexpr float k_speed_lost = 45.0f;
 
     // 加减速步长限制（非对称平滑）
-    constexpr float k_speed_up_step = 3.0f;
-    constexpr float k_speed_down_step = 5.0f;
+    constexpr float k_speed_up_step = 5.0f;
+    constexpr float k_speed_down_step = 8.0f;
 }
 
 float calc_base_speed(const TrackInfo &info)
@@ -38,6 +39,10 @@ float calc_base_speed(const TrackInfo &info)
     {
        target = k_speed_sharp;
         // test3 = 1;
+    }
+    else if (info.scene == TrackScene::Circle)
+    {
+        target = k_speed_circle;
     }
         
     else if (info.scene == TrackScene::GentleCurve)

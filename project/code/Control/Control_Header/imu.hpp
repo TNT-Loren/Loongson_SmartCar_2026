@@ -17,7 +17,7 @@ private:
        // 状态变量
        float gyro_z_bias = 0.0f;
        float last_gyro_z_dps = 0.0f;
-       float unbounded_yaw = 0.0f;
+       float unbounded_yaw = 0.0f;// 累积的无界航向角，单位度，正北为0，顺时针为正，逆时针为负，不限制在±180
 
        std::chrono::high_resolution_clock::time_point last_time;
 

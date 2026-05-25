@@ -1,6 +1,8 @@
 #include "zgc_draw_tool.hpp"
 
 #include "zf_common_font.hpp"
+#include <chrono>
+#include <cstdio>
 
 // ---- 内部工具函数，仅本文件可见 ----
 
@@ -394,5 +396,45 @@ void dbg_from_gray(uint16 (*dst)[image_width],
                 }
             }
         }
+    }
+}
+
+namespace
+{
+std::chrono::high_resolution_clock::time_point g_fps_last_tick;
+int  g_fps_frame_count = 0;
+auto g_fps_report_time = std::chrono::high_resolution_clock::now();
+}
+
+float g_fps_value     = 0.0f;   // 平滑后的帧率，每秒更新一次
+float g_frame_time_ms = 0.0f;   // 最近一帧图像处理耗时（毫秒）
+
+//=====================================================================================================================
+// 函数简介     帧率测量计时起点
+// 备注信息     在 Image_Process 或 image_test 入口处调用，记录当前时间戳
+//=====================================================================================================================
+void fps_timer_start(void)
+{
+    g_fps_last_tick = std::chrono::high_resolution_clock::now();
+}
+
+//=====================================================================================================================
+// 函数简介     帧率测量计时终点
+// 备注信息     在 Image_Process 或 image_test 出口处调用，更新 g_fps_value / g_frame_time_ms
+//=====================================================================================================================
+void fps_timer_end(void)
+{
+    auto now   = std::chrono::high_resolution_clock::now();
+    g_frame_time_ms = std::chrono::duration<float, std::milli>(now - g_fps_last_tick).count();
+    g_fps_last_tick = now;
+
+    ++g_fps_frame_count;
+
+    float elapsed_s = std::chrono::duration<float>(now - g_fps_report_time).count();
+    if (elapsed_s >= 1.0f)
+    {
+        g_fps_value = static_cast<float>(g_fps_frame_count) / elapsed_s;
+        g_fps_frame_count = 0;
+        g_fps_report_time = now;
     }
 }

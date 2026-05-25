@@ -1,5 +1,5 @@
 #include "scheduler.hpp"
-#include "IPM_image.hpp"
+#include "beep.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -14,7 +14,6 @@ extern TrackInfo g_track_info;
 
 // 【全车唯一的主定时器】
 zf_driver_pit master_timer;
-
 // 定义一个原子标志，初始值为0，表示不需要打印// std::atomic<uint8_t> 表示这是一个原子的 8 位无符号整数
 std::atomic<uint8_t> need_print(0);
 
@@ -22,6 +21,7 @@ std::atomic<uint8_t> need_print(0);
 static uint32_t tick_5ms = 0;
 static auto last_time = std::chrono::high_resolution_clock::now(); // 调度器专属的全局时间戳
 static float dt_sum_10ms = 0.0f;
+
 
 //===================================下面设置为全局变量，为了方便 TCP 线程访问和调试
 float target_speed = 0.0f;
@@ -52,6 +52,7 @@ void master_scheduler_callback()
     // ------------------ 3. 基础高频采样 (5ms) ------------------
     encoder_update_task(dt);
     imu_update_task(dt);
+    Beep_Task_5ms();
 
     tick_5ms++; // 时间轴向前推移
 
@@ -80,21 +81,35 @@ void master_scheduler_callback()
         // 反馈：全车的真实 yaw 角
         // 输出：差速转向修正量 (steer)
         // ==========================================================
-        float steer = pid_angle.calc(vision_target_yaw, yaw, control_dt);
-        float base_speed = calc_base_speed(g_track_info);
-        steer = std::clamp(steer, -base_speed, base_speed);// 软件限幅，防止转向过猛
+        float local_vision_target_yaw = yaw;
+        TrackInfo local_track_info;
+        {
+            std::lock_guard<std::mutex> lock(g_vision_result_mutex); // RAII 锁
+            local_vision_target_yaw = vision_target_yaw;
+            local_track_info = g_track_info;
+        } //离开作用域 → lock 析构 → 自动解锁
+
+        float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt); // PID 角度环计算
+        float base_speed = calc_base_speed(local_track_info);                   // 速度策略计算
+        steer = std::clamp(steer, -base_speed, base_speed);                     // 软件限幅，防止转向过猛
         // // ==========================================================
         // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
         // ==========================================================
         float target_speed_l = base_speed + steer;
         float target_speed_r = base_speed - steer;
 
-        // 绝对速度不能为负，底盘不支持倒车
-        target_speed_l = std::max(0.0f, target_speed_l);
-        target_speed_r = std::max(0.0f, target_speed_r);
+        float min_wheel_speed = 0.0f;
+        // （之后可提升）最好做成“急弯/圆环专用增强转向”
+        //  if (local_track_info.scene == TrackScene::SharpCurve)
+        //  {
+        //      min_wheel_speed = -15.0f;
+        //  }
+
+        target_speed_l = std::max(min_wheel_speed, target_speed_l);
+        target_speed_r = std::max(min_wheel_speed, target_speed_r);
 
         //===============================================================速度环内环
-        // /////////////////// 调速度环PID用
+        //  /////////////////调速度环PID用
         // target_speed = get_online_param(0);
         // kp = get_online_param(1);
         // ki = get_online_param(2);
@@ -127,18 +142,28 @@ void tcp_background_thread()
 {
     // nice(19) 将此线程优先级降到最低，绝不抢占控制算力
     nice(19);
+    uint32_t send_interval_us = 30000; // 初始间隔 30ms（33fps）
+    // 自适应退避的图传发送循环
     while (true)
     {
        // tcp_update_task(); // 执行网络收发与调参读取
-        // 图传发送 debug_image，发送时加锁，避免读到正在重绘的半帧。
+        // 图传发送 image_test() 刷新的原始灰度图，发送时加锁，避免读到半帧。
         {
-            std::lock_guard<std::mutex> lock(g_ipm_image_mutex);
+            std::lock_guard<std::mutex> lock(g_image_mutex); // 加锁，防止读到写一半的图像
             seekfree_assistant_camera_send();
         }
-        usleep(30000); // 休眠约 20ms (50Hz)
+        if (tcp_camera_send_failed())           // 发送失败
+        {
+            send_interval_us = std::min<uint32_t>(send_interval_us + 100000, 500000); // 间隔 +100ms，上限封顶 500ms，防止网络拥塞时疯狂重试
+        }
+        else if (send_interval_us > 100000)
+        {
+            send_interval_us -= 20000;
+        }
+        usleep(send_interval_us);
     }
 }
-    
+
 // 调度器初始化
 void scheduler_init()
 {

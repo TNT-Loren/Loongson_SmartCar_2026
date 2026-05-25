@@ -1,10 +1,10 @@
 #include "zf_common_headfile.hpp"
 #include "main.hpp"
-#include "image.hpp"
 #include <iostream>
-#include "IPM_image.hpp"
 #include "scheduler.hpp" // 引入中央调度器
+#include "beep.hpp"
 
+#include <cmath>
 #include <termios.h>
 #include <unistd.h>
 
@@ -22,23 +22,40 @@ void keyboard_poll_simple();
     速度是160的时候已经很快了0.72 0.16    0.6   0.2
     角度环：3.5 0.3    0.2
 */
-
 //int test=80;
 float test1, test2, test3, test4;
-int key_mode = 0; 
+int key_mode = 0;
 //===================================================
 void cleanup();
 void sigint_handler(int signum);
 
+const char *track_scene_name(TrackScene scene)
+{
+    switch (scene)
+    {
+    case TrackScene::Straight:
+        return "Straight";
+    case TrackScene::GentleCurve:
+        return "GentleCurve";
+    case TrackScene::SharpCurve:
+        return "SharpCurve";
+    case TrackScene::Circle:
+        return "Circle";
+    case TrackScene::LostLine:
+        return "LostLine";
+    default:
+        return "Unknown";
+    }
+}
+
 int main(int, char **)
 {
     // esc_init();
-    // esc_set_speed_percent(0);
-
+    //esc_set_speed_percent(0);
      imu_init();
      Encoder_Init();
+     Beep_Init();
      motor_init();
-
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
         //    //tcp_bind_variables(&target_yaw, &yaw);
@@ -55,32 +72,45 @@ int main(int, char **)
         std::cout << "  1 " << std::endl;
         return -1; // 摄像头初始化失败，直接退出程序
     }
-    
-
     atexit(cleanup);
     signal(SIGINT, sigint_handler);
     keyboard_init_simple();// 初始化简单键盘输入，供调试用
 
     uvc_dev.set_auto_exposure(1); // 关闭自动曝光，进入手动模式，才能设置曝光值
     uvc_dev.set_exposure_value(100); // 设置初始曝光值
+    {
+        std::lock_guard<std::mutex> lock(g_vision_result_mutex);
+        vision_target_yaw = yaw;
+    }
+    image_test(); // 启动控制调度前先准备一帧视觉结果，避免电机用默认视觉目标起步
 
     // 启动中央大脑！全车所有模块开始按时间片同步运转
     scheduler_init();
+    //test_front_point_patch_tools();
 
     while (1)
     {
 
         keyboard_poll_simple();// 轮询键盘输入，供调试用
        // esc_set_speed_percent(test1);
-        //image_test();
-        image_process();
-         //motor_set_speed(30, 30);
+        fps_timer_start();
+        image_test();
+        fps_timer_end();
+        // motor_set_speed(30, 30);
         if (need_print.load() == 1)
         {
-            std::cout << "mode_state: " << static_cast<int>(mode_state)
-                      << "  left_ring_process_state: " << static_cast<int>(left_ring_process_state)
-                      << "  rec=" << static_cast<int>(g_front_left_ring_yaw_recording_flag)
-                      << "  yaw=" << g_front_left_ring_progress_yaw
+            TrackInfo track_info;
+            float local_target_yaw = 0.0f;
+            {
+                std::lock_guard<std::mutex> lock(g_vision_result_mutex);
+                track_info = g_track_info;
+                local_target_yaw = vision_target_yaw;
+            }
+
+            std::cout << "  scene: " << track_scene_name(track_info.scene)
+            <<"   fps: " << g_fps_value
+                    //   << "  target_yaw: " << local_target_yaw
+                    //   << "  abs_deviation: " << std::fabs(track_info.deviation)
                       << std::endl;
             need_print.store(0);
         }
@@ -95,6 +125,7 @@ void sigint_handler(int signum)
 {
     master_timer.stop();
     printf("收到Ctrl+C,程序即将退出\n");
+    Beep(Off);
     motor_stop();
     exit(0);
 }
@@ -107,6 +138,7 @@ void cleanup()
     master_timer.stop();
 
     printf("程序异常退出，执行清理操作\n");
+    Beep(Off);
     motor_stop();
 }
 
@@ -162,21 +194,16 @@ void keyboard_poll_simple()
         {
         case 'a':
         case 'A':
-            toggle_front_debug_display_mode();
-            std::cout << "调试图显示模式切换为 " << get_front_debug_display_mode_name() << std::endl;
+            cycle_test_midline_mode();
+            std::cout << "test midline mode -> "
+                      << test_midline_mode_name(g_test_midline_mode)
+                      << std::endl;
             break;
 
         case 'b':
         case 'B':
-        {
-            const uint8 next_mode =
-                static_cast<uint8>((get_front_track_side_control_mode() + 1) %
-                                   (FrontTrackSideControlNone + 1));
-            set_front_track_side_control_mode(next_mode);
-            std::cout << "巡线控制模式切换为 "
-                      << get_front_track_side_control_mode_name() << std::endl;
+            std::cout << "当前版本已切回 image_test，巡线模式按键暂不使用" << std::endl;
             break;
-        }
 
         // case 'r':
         // case 'R':

@@ -1,7 +1,10 @@
 #include "tcp.hpp"
+#include "image_test.hpp"
+#include <atomic>
 
 // 静态对象，仅在当前文件内可见，符合封装原则
 zf_driver_tcp_client tcp_client_dev;
+static std::atomic<bool> g_tcp_camera_send_failed(false);
 
 // 指针池：用于保存外部需要监控的变量地址
 static float *monitor_ch[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -9,7 +12,15 @@ static float *monitor_ch[4] = {nullptr, nullptr, nullptr, nullptr};
 // =========================================================
 // 逐飞库底层适配函数 (Static 保护，防止外部误调)
 // =========================================================
-static uint32 tcp_send_wrap(const uint8 *buf, uint32 len) { return tcp_client_dev.send_data(buf, len); }
+static uint32 tcp_send_wrap(const uint8 *buf, uint32 len)
+{
+    const uint32 sent = tcp_client_dev.send_data(buf, len);
+    if (sent != len)
+    {
+        g_tcp_camera_send_failed.store(true);
+    }
+    return sent;
+}
 static uint32 tcp_read_wrap(uint8 *buf, uint32 len) { return tcp_client_dev.read_data(buf, len); }
 
 /**
@@ -22,6 +33,7 @@ bool tcp_debug_init(const char *ip, int port)
 {
     if (tcp_client_dev.init(ip, port) == 0)
     {
+        tcp_client_dev.set_retry_param(2, 2);
         printf("TCP Client OK. 成功连接逐飞助手!\n");
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
@@ -46,15 +58,12 @@ bool tcp_image_transmission_init(const char *ip, int port)
 {
     if (tcp_client_dev.init(ip, port) == 0)
     {
+        tcp_client_dev.set_retry_param(2, 2);
         printf("TCP Client OK. 成功连接逐飞助手!\n");
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
 
-        //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, copy_image, image_width, image_height);
-        //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image, image_width, image_height);
-     seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660, debug_image, image_width, image_height);
-        //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], UVC_WIDTH, UVC_HEIGHT);
-        //seekfree_assistant_camera_boundary_config(X_BOUNDARY, image_height, left_edge_line, mid_line, right_edge_line, NULL, NULL, NULL);
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660, debug_image[0], image_width, image_height);
         return true;
     }
     else
@@ -63,6 +72,11 @@ bool tcp_image_transmission_init(const char *ip, int port)
         return false;
     }
 
+}
+//读取故障状态的同时把它清零
+bool tcp_camera_send_failed(void)
+{
+    return g_tcp_camera_send_failed.exchange(false);
 }
 
 /**

@@ -6,37 +6,7 @@ uint16_t Weigth_Sum = 0;
 uint8_t midline1_fff, midline1_ff, midline1_f;
 uint8_t midline2_fff, midline2_ff, midline2_f;
 
-// 一：梯度限制、五点滑动平均滤波器来滤波中线
-void fit_midline(void) // 拟和中线，并进行滤波
-{
-    uint8 i;
-    for (i = image_height - 2; i >= 1; i--)
-    {
-        if (mid_line[i] - mid_line[i + 1] > 0)
-        {
-            if (mid_line[i] - mid_line[i + 1] > 8)
-            {
-                mid_line[i] = mid_line[i + 1] + 4;
-            }
-        }
-        else if (mid_line[i] - mid_line[i + 1] < 0)
-        {
-            if (mid_line[i + 1] - mid_line[i] > 8)
-            {
-                mid_line[i] = mid_line[i + 1] - 4;
-            }
-        }
-    }
-}
-
-void HDPJ_lvbo(void) // "滑动平均滤波"的拼音缩写
-{
-    uint8 i;
-    for (i = image_height - 3; i >= 3; i--)
-    {
-        mid_line[i] = (mid_line[i + 2] + mid_line[i + 1] + mid_line[i] + mid_line[i - 1] + mid_line[i - 2]) / 5;
-    }
-}
+// fit_midline() / HDPJ_lvbo() 已由 hu 版 image_test.cpp 提供。
 
 //// 在控制循环中
 // void Control_Loop(void)
@@ -100,7 +70,7 @@ float Cal_Weigth1(void)
 
     for (uint8 i = 1; i < 100; i++)
     {
-        Sum += mid_line[i] * Weigth1[i];
+        Sum += End_Mid_Line[i] * Weigth1[i];
         Weigth_Sum += Weigth1[i];
     }
 
@@ -110,7 +80,7 @@ float Cal_Weigth1(void)
     }
 
     // 检查数据有效性
-    if (Mid_Error > UVC_WIDTH || Mid_Error < 0)
+    if (Mid_Error > image_width || Mid_Error < 0)
     {
         return 0.0f; // 返回安全值
     }
@@ -122,7 +92,7 @@ float Cal_Weigth1(void)
     Mid_Error = midline1_fff * 0.20f + midline1_ff * 0.50f + midline1_f * 0.30f;
 
     // 归一化到 [-1, 1] 范围
-    float normalized_deviation = (Mid_Error - (UVC_WIDTH / 2.0f)) / (UVC_WIDTH / 2.0f);
+    float normalized_deviation = (Mid_Error - (image_width / 2.0f)) / (image_width / 2.0f);
 
     // 限制在合理范围内
     if (normalized_deviation > 1.0f)
@@ -141,7 +111,7 @@ float Cal_Weigth2(void)
 
     for (uint8 i = 1; i < 100; i++)
     {
-        Sum += mid_line[i] * Weigth2[i];
+        Sum += End_Mid_Line[i] * Weigth2[i];
         Weigth_Sum += Weigth2[i];
     }
 
@@ -151,7 +121,7 @@ float Cal_Weigth2(void)
     }
 
     // 检查数据有效性
-    if (Mid_Error > UVC_WIDTH || Mid_Error < 0)
+    if (Mid_Error > image_width || Mid_Error < 0)
     {
         return 0.0f; // 返回安全值
     }
@@ -163,7 +133,7 @@ float Cal_Weigth2(void)
     Mid_Error = midline2_fff * 0.20f + midline2_ff * 0.50f + midline2_f * 0.30f;
 
     //  归一化到 [-1, 1] 范围
-    float normalized_deviation = (Mid_Error - (UVC_WIDTH / 2.0f)) / (UVC_WIDTH / 2.0f);
+    float normalized_deviation = (Mid_Error - (image_width / 2.0f)) / (image_width / 2.0f);
 
     // 限制在合理范围内
     if (normalized_deviation > 1.0f)

@@ -12,6 +12,7 @@ enum class TrackScene : uint8_t
     Straight,
     GentleCurve,
     SharpCurve,
+    Circle,
     LostLine
 };
 
@@ -19,9 +20,10 @@ enum class TrackScene : uint8_t
 struct TrackInfo
 {
     TrackScene scene = TrackScene::Straight;
-    float deviation = 0.0f;
-    float curvature = 0.0f;
+    float deviation = 0.0f;// 横向偏差，范围 [-1, 1]，0=居中，负=左偏，正=右偏
 };
+
+extern TrackInfo g_track_info;
 
 // 基础速度计算接口
 float calc_base_speed(const TrackInfo &info);

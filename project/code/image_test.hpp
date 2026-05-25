@@ -1,33 +1,162 @@
-#ifndef __image_test_HPP__
-#define __image_test_HPP__
+#ifndef __IMAGE_TEST_HPP__
+#define __IMAGE_TEST_HPP__
 
 #include "zf_common_headfile.hpp"
+#include "image_size.hpp"
+#include <mutex>
 
-extern zf_device_uvc uvc_dev; // 定义UVC免驱摄像头设备对象，用于摄像头初始化/图像采集
+// ============================================================
+//  图像尺寸宏定义
+// ============================================================
+#define MT9V03X_H image_height       // 处理图像高度 120
+#define MT9V03X_W image_width        // 处理图像宽度 160
+#define image_w 150                  // IPM图像宽度
+#define image_h 100                  // IPM图像高度
 
-// #define MT9V03X_H UVC_HEIGHT
-// #define MT9V03X_W UVC_WIDTH
+// ============================================================
+//  像素值常量
+// ============================================================
+#define IMG_BLACK 0                  // 黑色像素（边界/黑线）
+#define IMG_WHITE 255                // 白色像素（赛道/可通行区域）
 
-// extern uint8 image_copy[UVC_HEIGHT][UVC_WIDTH];
-// extern uint8 bin_image[MT9V03X_H][MT9V03X_W]; // 二值化图像数组
-// extern uint8 Left_Line[MT9V03X_H];
-// extern uint8 Right_Line[MT9V03X_H];
-// extern uint8 Mid_Line[MT9V03X_H];
+// ============================================================
+//  边界搜索常量
+// ============================================================
+#define Border_Max (image_width - 2) // 右边界最大允许值 158
+#define Border_Min 1                 // 左边界最小允许值 1
+#define USE_num (MT9V03X_H * 3)     // 八邻域搜索最大步数 360
+
+// ============================================================
+//  外部设备与互斥锁
+// ============================================================
+extern zf_device_uvc uvc_dev;              // UVC摄像头设备
+extern std::mutex g_image_mutex;           // 图像数据互斥锁（保护图像采集/处理）
+extern std::mutex g_vision_result_mutex;   // 视觉结果互斥锁（保护偏差/场景输出）
+
+// ============================================================
+//  全局标志位结构体
+// ============================================================
+typedef struct
+{
+    uint8 Cross_Fill;          // 十字路口标志
+    uint8 Lose_Line_R;         // 右边界丢失标志
+    uint8 Lose_Line_L;         // 左边界丢失标志
+    bool Left_Circle;          // 左环岛标志
+    bool Right_Circle;         // 右环岛标志
+    bool Zerba;                // 斑马线标志
+    bool Roadblock;            // 路障标志
+    uint8 Ramp;                // 坡道标志
+    bool Get_Start_Point;      // 是否找到边界搜索起始点
+    bool L_Find;               // 是否找到左边界起点
+    bool R_Find;               // 是否找到右边界起点
+} Flag_Handle;
+
+// ============================================================
+//  图像数据数组（全局）
+// ============================================================
+extern uint8 *rgay_image;                          // 指向摄像头原始灰度图数据的指针
+extern uint8 image_copy[image_height][image_width]; // 缩放后的灰度图副本 120×160
+extern uint16 debug_image[image_height][image_width]; // RGB565 彩色调试图，供 SCC8660 图传使用
+extern bool g_debug_show_binary_image;                // false=灰度底图，true=二值底图
+extern uint8 bin_image[MT9V03X_H][MT9V03X_W];      // 二值化图像 120×160（0=黑/边界, 255=白/赛道）
+extern uint8 sobel_image[MT9V03X_H][MT9V03X_W];    // Sobel边缘检测图像
+extern uint8 bin_image_ipm[image_h][image_w];       // IPM逆透视变换后的二值图 100×150
+
+// ============================================================
+//  赛道边线数据（从下到上，行为索引）
+// ============================================================
+extern uint8 Left_Line[MT9V03X_H];       // 左边界每行的X坐标
+extern uint8 Right_Line[MT9V03X_H];      // 右边界每行的X坐标
+extern uint8 Mid_Line[MT9V03X_H];        // 原始中线每行的X坐标 = (左+右)/2
+extern uint8 End_Mid_Line[MT9V03X_H];    // 平滑滤波后的最终中线
+extern uint8 Test_Mid_Line[MT9V03X_H];   // 可靠边偏移生成的测试中线，仅用于图传对比
+extern uint8 Road_Wide[MT9V03X_H];       // 每行的道路宽度 = 右-左
 
 
-// // 定义膨胀和腐蚀的阈值区间
-// #define threshold_max 255 * 5 // 此参数可根据自己的需求调节
-// #define threshold_min 255 * 1 // 此参数可根据自己的需求调节
+// ============================================================
+//  输出给控制器的数据（像素坐标映射后的结果）
+// ============================================================
+extern uint8 left_edge_line[image_height];   // 限幅后的左边界X像素坐标
+extern uint8 right_edge_line[image_height];  // 限幅后的右边界X像素坐标
+extern uint8 mid_line[image_height];         // 限幅后的中线X像素坐标
+extern uint8 boundary_y_line[image_height];  // 行号标记
 
-// #define IMG_BLACK 0   // 0x00黑色
-// #define IMG_WHITE 255 // 0xff白色
+// ============================================================
+//  阈值与输出变量
+// ============================================================
+extern int Threshold;             // OTSU计算的全局二值化阈值
+extern int Threshold_IPM;         // IPM图像的二值化阈值
+extern float vision_target_yaw;   // 视觉计算的目标偏航角（供角度环使用）
+extern float Line_Error;          // 综合偏差值（Cal_Weigth计算结果）
+extern float Left_K;              // 左边界斜率
+extern float Right_K;             // 右边界斜率
 
-// #define Border_Max UVC_WIDTH - 2 // 边界最大值
-// #define Border_Min 1             // 边界最小值
+extern Flag_Handle Image_Flag;    // 全局标志位实例
 
-// #define USE_num (MT9V03X_H * 3)
+// ============================================================
+//  丢线与标志变量
+// ============================================================
+extern int Right_Lost_Time;               // 右边界丢失行数
+extern int Left_Lost_Time;                // 左边界丢失行数
+extern int Both_Lost_Time;                // 双边界同时丢失的行数
+extern uint8 flag_starting_line;          // 斑马线检测标志
+extern uint8 right_cusp_flag;             // 右侧尖点存在标志
+extern int16 right_cusp_row;              // 右侧尖点行坐标
+extern int16 right_cusp_col;              // 右侧尖点列坐标
+extern uint8 left_cusp_flag;              // 左侧尖点存在标志
+extern int16 left_cusp_row;               // 左侧尖点行坐标
+extern int16 left_cusp_col;               // 左侧尖点列坐标
+extern int continuity_change_right_flag;  // 右边界连续性变化位置（行号，0表示无变化）
+extern int continuity_change_left_flag;   // 左边界连续性变化位置（行号，0表示无变化）
+extern int monotonicity_change_left_flag; // 左边界单调性突变位置（拐点判断）
+extern int monotonicity_change_right_flag;// 右边界单调性突变位置（拐点判断）
+extern int left_down_guai[2];             // 左下拐点坐标 [0]=行, [1]=列
+extern int right_down_guai[2];            // 右下拐点坐标 [0]=行, [1]=列
+extern int monotonicity_change_line[2];   // 单调性变化位置的完整坐标 [0]=行, [1]=列
 
-// //=========================
-// void image_test(void);
+// ============================================================
+//  最长白列与边界跟踪数据
+// ============================================================
+/* 旧版最长白列起点参考变量，当前已停用但保留 cpp 中旧实现。
+extern int Longest_White_Column_Left[2];   // 左侧最长白列 [0]=长度, [1]=列号
+extern int Longest_White_Column_Right[2];  // 右侧最长白列 [0]=长度, [1]=列号
+*/
+extern uint16 points_l[(uint16)USE_num][2];// 左边界八邻域跟踪点集 [i][0]=X, [i][1]=Y
+extern uint16 points_r[(uint16)USE_num][2];// 右边界八邻域跟踪点集 [i][0]=X, [i][1]=Y
+extern uint16 dir_r[(uint16)USE_num];      // 右边界每个跟踪点的出界方向（0~7）
+extern uint16 dir_l[(uint16)USE_num];      // 左边界每个跟踪点的出界方向（0~7）
+extern uint16 data_stastics_l;             // 左边界实际跟踪到的点数
+extern uint16 data_stastics_r;             // 右边界实际跟踪到的点数
+extern int point_mode;                     // 拐点检测模式：0=突变找点，1=向量法找点
+extern uint8 start_point_l[2];             // 左边界搜索起始点 [0]=X, [1]=Y
+extern uint8 start_point_r[2];             // 右边界搜索起始点 [0]=X, [1]=Y
+extern uint8 hightest;                     // 左右边线汇合的最高行号
+extern uint8_t turn_point_num;             // 检测到的拐点总数（0~4）
+extern uint8_t island_state;               // 环岛状态机当前状态（0~6）
+
+enum class TestMidlineMode : uint8_t
+{
+    Auto = 0,       // 自动按左右边可靠性选择
+    ForceLeft = 1,  // 手动强制认为左边可靠
+    ForceRight = 2  // 手动强制认为右边可靠
+};
+
+extern TestMidlineMode g_test_midline_mode;
+
+// ============================================================
+//  核心视觉处理函数
+// ============================================================
+uint8 otsuThreshold(uint8 *image, uint16 col, uint16 row);   // 大津法自动计算二值化阈值
+void turn_to_bin(void);                                       // 将灰度图二值化为bin_image
+void image_filter(uint8 (*image)[MT9V03X_W]);                 // 3×3形态学滤波（膨胀+腐蚀）
+void image_draw_rectan(uint8 (*image)[MT9V03X_W]);            // 在图像左右边和顶部绘制黑框（防止搜索越界）
+void update_track_lines(void);                                // 将Left/Right_Line映射到边缘/中线像素坐标数组
+void build_debug_image(bool show_binary = false);                // 构建 RGB565 彩色调试图
+void Image_Process(void);                                     // 图像处理总入口（二值化→搜索边线→拐点→元素识别）
+void image_test(void);                                        // 视觉主循环函数（采集→处理→输出控制目标）
+float Cal_Weigth(void);                                       // 计算综合偏差权重Line_Error
+void build_test_midline(TestMidlineMode mode);                 // 生成可靠边偏移测试中线，不参与控制
+void cycle_test_midline_mode(void);                            // 键盘调试：切换测试中线可靠边模式
+const char *test_midline_mode_name(TestMidlineMode mode);      // 返回测试中线模式名
 
 #endif
