@@ -61,6 +61,8 @@ extern bool g_debug_show_binary_image;                // false=灰度底图，tr
 extern uint8 bin_image[MT9V03X_H][MT9V03X_W];      // 二值化图像 120×160（0=黑/边界, 255=白/赛道）
 extern uint8 sobel_image[MT9V03X_H][MT9V03X_W];    // Sobel边缘检测图像
 extern uint8 bin_image_ipm[image_h][image_w];       // IPM逆透视变换后的二值图 100×150
+extern int16 Ipm_Left_Line[MT9V03X_H];              // 原图左边线投影到 160x120 IPM 后的行数组，-1=无效
+extern int16 Ipm_Right_Line[MT9V03X_H];             // 原图右边线投影到 160x120 IPM 后的行数组，-1=无效
 
 // ============================================================
 //  赛道边线数据（从下到上，行为索引）
@@ -156,6 +158,10 @@ void Image_Process(void);                                     // 图像处理总
 void image_test(void);                                        // 视觉主循环函数（采集→处理→输出控制目标）
 float Cal_Weigth(void);                                       // 计算综合偏差权重Line_Error
 void build_test_midline(TestMidlineMode mode);                 // 生成可靠边偏移测试中线，不参与控制
+void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
+                            const uint8 right_line[MT9V03X_H],
+                            int16 ipm_left_line[MT9V03X_H],
+                            int16 ipm_right_line[MT9V03X_H]);     // 将原图左右边线投影成 160x120 IPM 行数组
 void cycle_test_midline_mode(void);                            // 键盘调试：切换测试中线可靠边模式
 const char *test_midline_mode_name(TestMidlineMode mode);      // 返回测试中线模式名
 

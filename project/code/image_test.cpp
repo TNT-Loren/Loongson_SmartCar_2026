@@ -211,6 +211,8 @@ uint8 Right_Line[MT9V03X_H];//右边线数组
 uint8 Mid_Line[MT9V03X_H];
 uint8 End_Mid_Line[MT9V03X_H];
 uint8 Test_Mid_Line[MT9V03X_H];
+int16 Ipm_Left_Line[MT9V03X_H];
+int16 Ipm_Right_Line[MT9V03X_H];
 uint8 Road_Wide[MT9V03X_H]; //赛道宽度
 uint8 bin_image_ipm[image_h][image_w];  //
 uint8 sobel_image[MT9V03X_H][MT9V03X_W];
@@ -317,6 +319,81 @@ void cycle_test_midline_mode(void)
     }
 }
 
+namespace
+{
+constexpr double k_image_to_ipm_mat[3][3] =
+{
+    {-1.75595238095241, -13.809523809524, 261.250000000003},
+    {0.238095238095245, -10.9523809523811, 269.16666666667},
+    {0.00297619047619057, -0.136904761904764, 1.0},
+};
+
+bool transform_image_to_ipm_point(int x, int y, int &ipm_x, int &ipm_y)
+{
+    const double denominator = k_image_to_ipm_mat[2][0] * x +
+                               k_image_to_ipm_mat[2][1] * y +
+                               k_image_to_ipm_mat[2][2];
+    if (std::fabs(denominator) < 1e-9)
+    {
+        return false;
+    }
+
+    const double transformed_x = (k_image_to_ipm_mat[0][0] * x +
+                                  k_image_to_ipm_mat[0][1] * y +
+                                  k_image_to_ipm_mat[0][2]) / denominator;
+    const double transformed_y = (k_image_to_ipm_mat[1][0] * x +
+                                  k_image_to_ipm_mat[1][1] * y +
+                                  k_image_to_ipm_mat[1][2]) / denominator;
+    ipm_x = static_cast<int>(std::lround(transformed_x));
+    ipm_y = static_cast<int>(std::lround(transformed_y));
+    return ipm_x >= 0 && ipm_x < MT9V03X_W && ipm_y >= 0 && ipm_y < MT9V03X_H;
+}
+}
+
+void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
+                            const uint8 right_line[MT9V03X_H],
+                            int16 ipm_left_line[MT9V03X_H],
+                            int16 ipm_right_line[MT9V03X_H])
+{
+    int16 left_source_row[MT9V03X_H];
+    int16 right_source_row[MT9V03X_H];
+    for (int row = 0; row < MT9V03X_H; ++row)
+    {
+        ipm_left_line[row] = -1;
+        ipm_right_line[row] = -1;
+        left_source_row[row] = -1;
+        right_source_row[row] = -1;
+    }
+
+    for (int row = std::max<int>(hightest, 0); row < MT9V03X_H; ++row)
+    {
+        const int left = left_line[row];
+        const int right = right_line[row];
+        if (left > Border_Min && left < Border_Max)
+        {
+            int ipm_x = 0;
+            int ipm_y = 0;
+            if (transform_image_to_ipm_point(left, row, ipm_x, ipm_y) &&
+                    (ipm_left_line[ipm_y] < 0 || row > left_source_row[ipm_y]))
+            {
+                ipm_left_line[ipm_y] = static_cast<int16>(ipm_x);
+                left_source_row[ipm_y] = static_cast<int16>(row);
+            }
+        }
+        if (right > Border_Min && right < Border_Max)
+        {
+            int ipm_x = 0;
+            int ipm_y = 0;
+            if (transform_image_to_ipm_point(right, row, ipm_x, ipm_y) &&
+                    (ipm_right_line[ipm_y] < 0 || row > right_source_row[ipm_y]))
+            {
+                ipm_right_line[ipm_y] = static_cast<int16>(ipm_x);
+                right_source_row[ipm_y] = static_cast<int16>(row);
+            }
+        }
+    }
+}
+
 void build_test_midline(TestMidlineMode mode)
 {
     const bool left_good = Left_Lost_Time < 35 &&
@@ -325,23 +402,72 @@ void build_test_midline(TestMidlineMode mode)
     const bool right_good = Right_Lost_Time < 35 &&
                             data_stastics_r > 25 &&
                             continuity_change_right_flag == 0;
+    const bool use_left = (mode == TestMidlineMode::ForceLeft) ||
+                          (mode == TestMidlineMode::Auto && left_good && !right_good);
+    const bool use_right = (mode == TestMidlineMode::ForceRight) ||
+                           (mode == TestMidlineMode::Auto && right_good && !left_good);
 
     for (int row = 0; row < MT9V03X_H; ++row)
     {
-        int mid = (static_cast<int>(Left_Line[row]) + static_cast<int>(Right_Line[row])) / 2;
-        if (mode == TestMidlineMode::ForceLeft || (mode == TestMidlineMode::Auto && left_good && !right_good))
+        Test_Mid_Line[row] = 0;
+    }
+
+    constexpr int k_sample_margin_rows = 5;
+    const int valid_top_row = std::clamp<int>(hightest + k_sample_margin_rows,
+                                              k_sample_margin_rows,
+                                              MT9V03X_H - k_sample_margin_rows - 1);
+    const int valid_bottom_row = MT9V03X_H - k_sample_margin_rows - 1;
+
+    float width_scale_sum = 0.0f;
+    int width_scale_count = 0;
+    for (int row = valid_top_row; row <= valid_bottom_row; ++row)
+    {
+        const int left = Left_Line[row];
+        const int right = Right_Line[row];
+        const int measured_width = right - left;
+        const int standard_width = Standard_Road_Wide[row];
+        if (left > Border_Min + 2 && right < Border_Max - 2 &&
+                measured_width > standard_width / 2 &&
+                measured_width < standard_width * 3 / 2)
         {
-            mid = static_cast<int>(Left_Line[row]) + static_cast<int>(Standard_Road_Wide[row]) / 2;
+            width_scale_sum += static_cast<float>(measured_width) / static_cast<float>(standard_width);
+            width_scale_count++;
         }
-        else if (mode == TestMidlineMode::ForceRight || (mode == TestMidlineMode::Auto && right_good && !left_good))
+    }
+
+    const float width_scale = (width_scale_count > 0)
+                              ? std::clamp(width_scale_sum / static_cast<float>(width_scale_count), 0.70f, 1.30f)
+                              : 1.0f;
+
+    for (int row = valid_top_row; row <= valid_bottom_row; ++row)
+    {
+        int mid = (static_cast<int>(Left_Line[row]) + static_cast<int>(Right_Line[row])) / 2;
+        const int half_width = static_cast<int>(std::lround(static_cast<float>(Standard_Road_Wide[row]) * width_scale * 0.5f));
+        if (use_left)
         {
-            mid = static_cast<int>(Right_Line[row]) - static_cast<int>(Standard_Road_Wide[row]) / 2;
+            mid = static_cast<int>(Left_Line[row]) + half_width;
+        }
+        else if (use_right)
+        {
+            mid = static_cast<int>(Right_Line[row]) - half_width;
         }
 
         Test_Mid_Line[row] = static_cast<uint8>(std::clamp(mid, 0, image_width - 1));
     }
-}
 
+    for (int row = valid_bottom_row - 1; row >= valid_top_row; --row)
+    {
+        const int delta = static_cast<int>(Test_Mid_Line[row]) - static_cast<int>(Test_Mid_Line[row + 1]);
+        if (delta > 8)
+        {
+            Test_Mid_Line[row] = static_cast<uint8>(std::clamp<int>(Test_Mid_Line[row + 1] + 4, 0, image_width - 1));
+        }
+        else if (delta < -8)
+        {
+            Test_Mid_Line[row] = static_cast<uint8>(std::clamp<int>(Test_Mid_Line[row + 1] - 4, 0, image_width - 1));
+        }
+    }
+}
 //绝对值
 int my_abs(int value)
 {
@@ -3335,6 +3461,7 @@ void Image_Process(void)
         Mid_Line[i] = (Right_Line[i] + Left_Line[i]) >> 1;//求中线
        // Road_Wide[i]=Right_Line[i]-Left_Line[i];
     }
+    transform_lines_to_ipm(Left_Line, Right_Line, Ipm_Left_Line, Ipm_Right_Line);
     build_test_midline(g_test_midline_mode);
 //   print_road_width_calibration();
     fit_midline();
@@ -3434,7 +3561,10 @@ void draw_debug_track_lines(uint16 (*img)[image_width])
         dbg_point(img, left_edge_line[row], row, left_color);
         dbg_point(img, right_edge_line[row], row, right_color);
         dbg_point(img, mid_line[row], row, mid_color);
-        dbg_cross(img, Test_Mid_Line[row], row, test_mid_color, 1);
+        if (Test_Mid_Line[row] > 0)
+        {
+            dbg_cross(img, Test_Mid_Line[row], row, test_mid_color, 1);
+        }
     }
 }
 
