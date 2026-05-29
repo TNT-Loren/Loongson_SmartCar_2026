@@ -18,6 +18,7 @@ uint8 *rgay_image = nullptr;
 uint8 image_copy[image_height][image_width] = {{0}};
 uint16 debug_image[image_height][image_width] = {{0}};
 bool g_debug_show_binary_image = true;
+bool g_debug_show_ipm_lines = false;
 uint8 left_edge_line[image_height] = {0};
 uint8 right_edge_line[image_height] = {0};
 uint8 mid_line[image_height] = {0};
@@ -319,41 +320,78 @@ void cycle_test_midline_mode(void)
     }
 }
 
+void cycle_debug_view_mode(void)
+{
+    g_debug_show_ipm_lines = !g_debug_show_ipm_lines;
+}
+
+const char *debug_view_mode_name(void)
+{
+    return g_debug_show_ipm_lines ? "IPM_LINES" : "NORMAL";
+}
+
+//===================================对边线进行处理
+/*
+（选择可靠边线、IPM、滤波、偏移中线、控制）
+选择可靠边：
+
+对边线进行IPM：变换矩阵 k_image_to_ipm_mat[3][3]
+
+*/
+
+
 namespace
 {
-constexpr double k_image_to_ipm_mat[3][3] =
-{
-    {-1.75595238095241, -13.809523809524, 261.250000000003},
-    {0.238095238095245, -10.9523809523811, 269.16666666667},
-    {0.00297619047619057, -0.136904761904764, 1.0},
-};
-
-bool transform_image_to_ipm_point(int x, int y, int &ipm_x, int &ipm_y)
-{
-    const double denominator = k_image_to_ipm_mat[2][0] * x +
-                               k_image_to_ipm_mat[2][1] * y +
-                               k_image_to_ipm_mat[2][2];
-    if (std::fabs(denominator) < 1e-9)
+    //mat2
+    constexpr double k_image_to_ipm_mat[3][3] =
     {
-        return false;
+        {1.54922851132135, 4.87986157380177, -49.7605197103311},
+        {-0.244732053958449, 8.58083223015027, -50.5084935687455},
+        {-0.00215511349918493, 0.0612137810224406, 1},
+    };
+
+    /*
+    double Mat1[3][3]=       { { 0.594503055500757, -0.403675880267065, 9.19372040877073},
+                     { 0.0180084692930395, 0.0734423608040157, 4.6055737995523},
+                     { 0.0001788550643629, -0.005365651930887, 0.73788892491219}, };
+
+    double Mat2[3][3]= { { 1.54922851132135, 4.87986157380177, -49.7605197103311},
+                     { -0.244732053958449, 8.58083223015027, -50.5084935687455},
+                     { -0.00215511349918493, 0.0612137810224406, 1}, };
+    */
+
+    /*
+    单点坐标变换函数。输入原图坐标 (x, y)，使用内部的 k_image_to_ipm_mat 矩阵，也就是 Mat2，把它转换成 IPM 坐标 (ipm_x, ipm_y)。
+    如果齐次坐标分母接近 0，或者转换后的点超出 160x120 范围，就返回 false；否则返回 true。
+    */
+    bool transform_image_to_ipm_point(int x, int y, int &ipm_x, int &ipm_y)
+    {
+        const double denominator = k_image_to_ipm_mat[2][0] * x +
+                                   k_image_to_ipm_mat[2][1] * y +
+                                   k_image_to_ipm_mat[2][2];
+        if (std::fabs(denominator) < 1e-9)
+        {
+            return false;
+        }
+
+        const double transformed_x = (k_image_to_ipm_mat[0][0] * x +
+                                      k_image_to_ipm_mat[0][1] * y +
+                                      k_image_to_ipm_mat[0][2]) /
+                                     denominator;
+        const double transformed_y = (k_image_to_ipm_mat[1][0] * x +
+                                      k_image_to_ipm_mat[1][1] * y +
+                                      k_image_to_ipm_mat[1][2]) /
+                                     denominator;
+        ipm_x = static_cast<int>(std::lround(transformed_x));
+        ipm_y = static_cast<int>(std::lround(transformed_y));
+        return ipm_x >= 0 && ipm_x < MT9V03X_W && ipm_y >= 0 && ipm_y < MT9V03X_H;
     }
-
-    const double transformed_x = (k_image_to_ipm_mat[0][0] * x +
-                                  k_image_to_ipm_mat[0][1] * y +
-                                  k_image_to_ipm_mat[0][2]) / denominator;
-    const double transformed_y = (k_image_to_ipm_mat[1][0] * x +
-                                  k_image_to_ipm_mat[1][1] * y +
-                                  k_image_to_ipm_mat[1][2]) / denominator;
-    ipm_x = static_cast<int>(std::lround(transformed_x));
-    ipm_y = static_cast<int>(std::lround(transformed_y));
-    return ipm_x >= 0 && ipm_x < MT9V03X_W && ipm_y >= 0 && ipm_y < MT9V03X_H;
-}
 }
 
-void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
-                            const uint8 right_line[MT9V03X_H],
-                            int16 ipm_left_line[MT9V03X_H],
-                            int16 ipm_right_line[MT9V03X_H])
+/*
+整条边线转换函数。输入原图行数组形式的 left_line / right_line，逐行把左右边界点通过 transform_image_to_ipm_point() 投影到 IPM 坐标系。输出到 ipm_left_line / ipm_right_line，格式仍然是行数组：
+*/
+void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H], const uint8 right_line[MT9V03X_H], int16 ipm_left_line[MT9V03X_H], int16 ipm_right_line[MT9V03X_H])
 {
     int16 left_source_row[MT9V03X_H];
     int16 right_source_row[MT9V03X_H];
@@ -394,6 +432,33 @@ void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
     }
 }
 
+void transform_points_to_ipm_line(const uint16 points[][2], uint16 count, int16 ipm_line[MT9V03X_H])
+{
+    int16 source_row[MT9V03X_H];
+    for (int row = 0; row < MT9V03X_H; ++row)
+    {
+        ipm_line[row] = -1;
+        source_row[row] = -1;
+    }
+
+    for (uint16 i = 0; i < count; ++i)
+    {
+        const int x = points[i][0];
+        const int y = points[i][1];
+        int ipm_x = 0;
+        int ipm_y = 0;
+        if (transform_image_to_ipm_point(x, y, ipm_x, ipm_y) &&
+                (ipm_line[ipm_y] < 0 || y > source_row[ipm_y]))
+        {
+            ipm_line[ipm_y] = static_cast<int16>(ipm_x);
+            source_row[ipm_y] = static_cast<int16>(y);
+        }
+    }
+}
+
+/*
+黄色测试中线生成函数，只用于图传对比，不参与控制。它根据当前 TestMidlineMode 判断使用左边、右边，还是自动可靠边。现在的版本还是基于原图 Left_Line/Right_Line 做“动态宽度倍率 + 同行偏移”：
+*/
 void build_test_midline(TestMidlineMode mode)
 {
     const bool left_good = Left_Lost_Time < 35 &&
@@ -3420,12 +3485,14 @@ void Image_Process(void)
 //	Draw_Line(MT9V03X_W-1, 0,0,MT9V03X_H-5);
     data_stastics_l = 0;
     data_stastics_r = 0;
-    // Get_Longest_Line();									//旧版最长白列起点参考已停用
-    // shortest_White_Column(10,140);
+    transform_points_to_ipm_line(points_l, 0, Ipm_Left_Line);
+    transform_points_to_ipm_line(points_r, 0, Ipm_Right_Line);
     //check_cheku(90,30,4);									//找斑马线
     if(get_start_point(MT9V03X_H - 2))
     {
         search_l_r((uint16)USE_num,bin_image,&data_stastics_l, &data_stastics_r,start_point_l[0], start_point_l[1], start_point_r[0], start_point_r[1],&hightest);		//八邻域找边界
+        transform_points_to_ipm_line(points_l, data_stastics_l, Ipm_Left_Line);
+        transform_points_to_ipm_line(points_r, data_stastics_r, Ipm_Right_Line);
 
         get_left(data_stastics_l);		//取出边界
         get_right(data_stastics_r);
@@ -3451,9 +3518,9 @@ void Image_Process(void)
             Island_Detect();
         }
 
-        test1 = static_cast<float>(island_state);                     // 圆环状态机当前状态
-        test2 = static_cast<float>(continuity_change_left_flag);       // 左圆环左边界连续性变化行
-        test3 = static_cast<float>(monotonicity_change_left_flag);     // 左圆环左边界单调性变化行
+        // test1 = static_cast<float>(island_state);                     // 圆环状态机当前状态
+        // test2 = static_cast<float>(continuity_change_left_flag);       // 左圆环左边界连续性变化行
+        // test3 = static_cast<float>(monotonicity_change_left_flag);     // 左圆环左边界单调性变化行
     }
 //		Left_Add_Line(1,MT9V03X_H-5,MT9V03X_W-1,0);
     for (i = 0; i <  MT9V03X_H; i++)
@@ -3461,22 +3528,12 @@ void Image_Process(void)
         Mid_Line[i] = (Right_Line[i] + Left_Line[i]) >> 1;//求中线
        // Road_Wide[i]=Right_Line[i]-Left_Line[i];
     }
-    transform_lines_to_ipm(Left_Line, Right_Line, Ipm_Left_Line, Ipm_Right_Line);
     build_test_midline(g_test_midline_mode);
 //   print_road_width_calibration();
     fit_midline();
     HDPJ_lvbo();
     Line_Error = Cal_Weigth();                  // 加权中线偏差（已归一化到 [-1, 1]）
-//    remove_isolated_black_regions(bin_image);
-//   detect_curvature();
-//		Draw_Line(MT9V03X_W/2,1,MT9V03X_W/2,MT9V03X_H/2);
-//		if(car.mode != 1)
-//		{
-//			Draw_Line(0, 0,MT9V03X_W/2,MT9V03X_H/2-20);
-//			Draw_Line(MT9V03X_W-1, 0,MT9V03X_W/2,MT9V03X_H/2-20);
-//			remove_isolated_black_regions(bin_image);
-//			detect_curvature();
-//		}
+
 //    clear_block();
 }
 
@@ -3647,9 +3704,40 @@ void draw_debug_corners(uint16 (*img)[image_width])
 }
 }
 
+void build_ipm_lines_debug_image(uint16 (*img)[image_width])
+{
+    const uint16 bg_color = debug_color(RGB565_WHITE);
+    const uint16 line_color = debug_color(RGB565_BLACK);
+    for (int row = 0; row < image_height; ++row)
+    {
+        for (int col = 0; col < image_width; ++col)
+        {
+            img[row][col] = bg_color;
+        }
+    }
+
+    for (int row = 0; row < MT9V03X_H; ++row)
+    {
+        if (Ipm_Left_Line[row] >= 0)
+        {
+            dbg_point(img, Ipm_Left_Line[row], row, line_color);
+        }
+        if (Ipm_Right_Line[row] >= 0)
+        {
+            dbg_point(img, Ipm_Right_Line[row], row, line_color);
+        }
+    }
+}
+
 // 构建 SCC8660 彩色调试图。只写 debug_image，不回写算法使用的灰度图/二值图。
 void build_debug_image(bool show_binary)
 {
+    if (g_debug_show_ipm_lines)
+    {
+        build_ipm_lines_debug_image(debug_image);
+        return;
+    }
+
     dbg_from_gray(debug_image,
                   show_binary ? bin_image : image_copy,
                   nullptr,

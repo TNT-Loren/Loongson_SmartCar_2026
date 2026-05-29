@@ -58,6 +58,7 @@ extern uint8 *rgay_image;                          // 指向摄像头原始灰�
 extern uint8 image_copy[image_height][image_width]; // 缩放后的灰度图副本 120×160
 extern uint16 debug_image[image_height][image_width]; // RGB565 彩色调试图，供 SCC8660 图传使用
 extern bool g_debug_show_binary_image;                // false=灰度底图，true=二值底图
+extern bool g_debug_show_ipm_lines;                    // false=普通图传，true=白底IPM边线图
 extern uint8 bin_image[MT9V03X_H][MT9V03X_W];      // 二值化图像 120×160（0=黑/边界, 255=白/赛道）
 extern uint8 sobel_image[MT9V03X_H][MT9V03X_W];    // Sobel边缘检测图像
 extern uint8 bin_image_ipm[image_h][image_w];       // IPM逆透视变换后的二值图 100×150
@@ -164,5 +165,7 @@ void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
                             int16 ipm_right_line[MT9V03X_H]);     // 将原图左右边线投影成 160x120 IPM 行数组
 void cycle_test_midline_mode(void);                            // 键盘调试：切换测试中线可靠边模式
 const char *test_midline_mode_name(TestMidlineMode mode);      // 返回测试中线模式名
+void cycle_debug_view_mode(void);                              // 键盘调试：切换普通图传/IPM边线图
+const char *debug_view_mode_name(void);                        // 返回当前图传显示模式名
 
 #endif

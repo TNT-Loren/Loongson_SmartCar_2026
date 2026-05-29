@@ -52,16 +52,15 @@ int main(int, char **)
 {
     // esc_init();
     //esc_set_speed_percent(0);
-     imu_init();
-     Encoder_Init();
+    //  imu_init();
+    //  Encoder_Init();
      Beep_Init();
-     motor_init();
+    // motor_init();
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
         //    //tcp_bind_variables(&target_yaw, &yaw);
         //    //tcp_bind_variables(&speed1, &speed2);
         // }
-
     if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
     {
         return -1;
@@ -205,11 +204,13 @@ void keyboard_poll_simple()
             std::cout << "当前版本已切回 image_test，巡线模式按键暂不使用" << std::endl;
             break;
 
-        // case 'r':
-        // case 'R':
-        //     test = 0.0f;
-        //     std::cout << "test reset -> " << test << std::endl;
-        //     break;
+        case 'd':
+        case 'D':
+            cycle_debug_view_mode();
+            std::cout << "debug view -> "
+                      << debug_view_mode_name()
+                      << std::endl;
+            break;
 
         // case 's':
         // case 'S':
