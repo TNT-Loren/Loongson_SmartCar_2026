@@ -4,6 +4,7 @@
 #include "scheduler.hpp" // 引入中央调度器
 #include "beep.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <termios.h>
 #include <unistd.h>
@@ -28,6 +29,20 @@ int key_mode = 0;
 //===================================================
 void cleanup();
 void sigint_handler(int signum);
+void print_ipm_mid_points_snapshot();
+
+float wrap_delta_yaw_for_print(float angle)
+{
+    while (angle > 180.0f)
+    {
+        angle -= 360.0f;
+    }
+    while (angle <= -180.0f)
+    {
+        angle += 360.0f;
+    }
+    return angle;
+}
 
 const char *track_scene_name(TrackScene scene)
 {
@@ -52,10 +67,10 @@ int main(int, char **)
 {
     // esc_init();
     //esc_set_speed_percent(0);
-    //  imu_init();
-    //  Encoder_Init();
+     imu_init();
+      Encoder_Init();
      Beep_Init();
-    // motor_init();
+     motor_init();
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
         //    //tcp_bind_variables(&target_yaw, &yaw);
@@ -81,7 +96,14 @@ int main(int, char **)
         std::lock_guard<std::mutex> lock(g_vision_result_mutex);
         vision_target_yaw = yaw;
     }
-    image_test(); // 启动控制调度前先准备一帧视觉结果，避免电机用默认视觉目标起步
+    if (image_test()) // 启动控制调度前先准备一帧视觉结果，避免电机用默认视觉目标起步
+    {
+        update_control_target();
+    }
+    else
+    {
+        publish_lost_line_result();
+    }
 
     // 启动中央大脑！全车所有模块开始按时间片同步运转
     scheduler_init();
@@ -93,27 +115,86 @@ int main(int, char **)
         keyboard_poll_simple();// 轮询键盘输入，供调试用
        // esc_set_speed_percent(test1);
         fps_timer_start();
-        image_test();
+        if (image_test())
+        {
+            update_control_target();
+        }
+        else
+        {
+            publish_lost_line_result();
+        }
         fps_timer_end();
         // motor_set_speed(30, 30);
         if (need_print.load() == 1)
         {
             TrackInfo track_info;
+            float local_yaw = 0.0f;
             float local_target_yaw = 0.0f;
             {
                 std::lock_guard<std::mutex> lock(g_vision_result_mutex);
                 track_info = g_track_info;
+                local_yaw = yaw;
                 local_target_yaw = vision_target_yaw;
             }
+            const float relative_yaw_error = wrap_delta_yaw_for_print(local_target_yaw - local_yaw);
 
             std::cout << "  scene: " << track_scene_name(track_info.scene)
-            <<"   fps: " << g_fps_value
-                    //   << "  target_yaw: " << local_target_yaw
-                    //   << "  abs_deviation: " << std::fabs(track_info.deviation)
+                      << "   fps: " << g_fps_value
+                      << "  rel_yaw_error: " << relative_yaw_error
+                      << "  deviation: " << track_info.deviation
                       << std::endl;
             need_print.store(0);
         }
         system_delay_ms(10);
+    }
+}
+
+void print_ipm_mid_points_snapshot()
+{
+    uint16 mid_points[MT9V03X_H][2] = {};
+    uint16 mid_count = 0;
+    uint8 current_hightest = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_image_mutex);
+        mid_count = std::min<uint16>(Ipm_Mid_Point_Count, MT9V03X_H);
+        current_hightest = hightest;
+        for (uint16 i = 0; i < mid_count; ++i)
+        {
+            mid_points[i][0] = Ipm_Mid_Points[i][0];
+            mid_points[i][1] = Ipm_Mid_Points[i][1];
+        }
+    }
+
+    const IpmMidlineSceneResult scene_result =
+        classify_ipm_midline_scene(mid_points, mid_count, current_hightest);
+
+    std::cout << "\n[IPM_MID_POINTS] count=" << mid_count
+              << " hightest=" << static_cast<int>(current_hightest)
+              << " scene=" << ipm_midline_scene_name(scene_result.scene)
+              << " x_span=" << scene_result.x_span
+              << " y_span=" << scene_result.y_span
+              << " ratio=" << scene_result.x_y_ratio
+              << " turns=" << scene_result.turn_count
+              << " straightness=" << scene_result.straightness
+              << " mean_curv=" << scene_result.mean_abs_curv
+              << " max_curv=" << scene_result.max_abs_curv
+              << std::endl;
+    std::cout << "scores straight=" << scene_result.straight_score
+              << " gentle=" << scene_result.gentle_score
+              << " s=" << scene_result.s_score
+              << " sharp=" << scene_result.sharp_score
+              << std::endl;
+    for (uint16 i = 0; i < mid_count; ++i)
+    {
+        std::cout << "(" << mid_points[i][0] << "," << mid_points[i][1] << ")";
+        if ((i + 1) % 12 == 0 || i + 1 == mid_count)
+        {
+            std::cout << std::endl;
+        }
+        else
+        {
+            std::cout << " ";
+        }
     }
 }
 
@@ -194,8 +275,11 @@ void keyboard_poll_simple()
         case 'a':
         case 'A':
             cycle_test_midline_mode();
+            cycle_ipm_reliable_edge_mode();
             std::cout << "test midline mode -> "
                       << test_midline_mode_name(g_test_midline_mode)
+                      << ", ipm reliable edge -> "
+                      << reliable_edge_mode_name(g_ipm_reliable_edge_mode)
                       << std::endl;
             break;
 
@@ -212,11 +296,10 @@ void keyboard_poll_simple()
                       << std::endl;
             break;
 
-        // case 's':
-        // case 'S':
-        //     motor_stop();
-        //     std::cout << "motor stop" << std::endl;
-        //     break;
+        case 's':
+        case 'S':
+            print_ipm_mid_points_snapshot();
+            break;
 
         default:
             break;

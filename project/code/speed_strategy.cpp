@@ -12,15 +12,22 @@ namespace
     // constexpr float k_speed_sharp = 110.0f;
     // constexpr float k_speed_lost = 90.0f;
 
-    constexpr float k_speed_straight = 65.0f;
+    // constexpr float k_speed_straight = 130.0f;
+    // constexpr float k_speed_curve = 115.0f;
+    // constexpr float k_speed_sharp = 105.0f;
+    // constexpr float k_speed_lost = 90.0f;
+
+    constexpr float k_speed_straight = 60.0f;
     constexpr float k_speed_curve = 55.0f;
-    constexpr float k_speed_sharp = 55.0f;
-    constexpr float k_speed_circle = 37.0f;
-    constexpr float k_speed_lost = 45.0f;
+    constexpr float k_speed_sharp = 50.0f;
+     constexpr float k_speed_circle = 50.0f;
+    constexpr float k_speed_lost = 50.0f;
 
     // 加减速步长限制（非对称平滑）
     constexpr float k_speed_up_step = 5.0f;
     constexpr float k_speed_down_step = 8.0f;
+    // deviation 现在是 pure pursuit 的 alpha 角度，不是历史归一化横偏。
+    constexpr float k_large_alpha_slowdown_deg = 25.0f;// 角度误差过大时的强制降速幅度（不考虑场景，仅按角度误差单因素调整速度）
 }
 
 float calc_base_speed(const TrackInfo &info)
@@ -57,8 +64,8 @@ float calc_base_speed(const TrackInfo &info)
     }
         
 
-    // 2. 安全兜底：当横向偏差过大时，无论直道弯道均强制降速
-    if (std::fabs(info.deviation) > 0.35f)
+    // 2. 安全兜底：pure pursuit 角度误差过大时，无论直道弯道均强制降速
+    if (std::fabs(info.deviation) > k_large_alpha_slowdown_deg)
         target -= 8.0f;
 
     // 3. 动态平滑限幅（入弯急刹，出弯缓加）

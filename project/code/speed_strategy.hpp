@@ -20,7 +20,7 @@ enum class TrackScene : uint8_t
 struct TrackInfo
 {
     TrackScene scene = TrackScene::Straight;
-    float deviation = 0.0f;// 横向偏差，范围 [-1, 1]，0=居中，负=左偏，正=右偏
+    float deviation = 0.0f;// pure pursuit 角度误差，单位：度，负=左，正=右
 };
 
 extern TrackInfo g_track_info;

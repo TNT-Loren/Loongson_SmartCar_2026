@@ -1,6 +1,5 @@
 #include "image_test.hpp"
 #include "car_control.hpp"
-#include "speed_strategy.hpp"
 #include "zgc_draw_tool.hpp"
 
 #include <algorithm>
@@ -26,12 +25,8 @@ uint8 boundary_y_line[image_height] = {0};
 
 uint8 complete = 0; //后续可与斑马线配合完赛
 
-float vision_target_yaw = 0.0f;// 视觉计算的目标偏航角（供角度环使用）
-
 extern float yaw;
-extern TrackInfo g_track_info;
 extern float test1, test2, test3;
-extern uint8_t island_state;
 
 namespace
 {
@@ -47,6 +42,18 @@ namespace
     constexpr int k_right_circle_short_col_fallback_x = (MT9V03X_W - 1) - k_left_circle_short_col_fallback_x;
     constexpr int k_circle_short_col_fallback_y = 20;
 
+    enum class IpmReliableEdge : uint8_t
+    {
+        Left,
+        Right
+    };
+
+    IpmReliableEdge g_ipm_auto_reliable_edge = IpmReliableEdge::Left;
+    int g_prefill_left_lost_time = MT9V03X_H;
+    int g_prefill_right_lost_time = MT9V03X_H;
+    float g_prefill_left_lost_ratio = 1.0f;
+    float g_prefill_right_lost_ratio = 1.0f;
+
     struct HuCarCompat
     {
         float circle_intergrate_yaw = 0.0f;
@@ -60,69 +67,6 @@ namespace
 HuCarCompat car; // 用于圆环 yaw 累计角度。
 HuMcxCompat mcx;//用于判断是否已经完成起跑/停车逻辑
 float g_circle_unbounded_yaw_zero = 0.0f;// 记录进入圆环阶段时的无界 yaw 零点。
-
-float wrap_to_180_local(float angle)
-{
-    while (angle > 180.0f)
-    {
-        angle -= 360.0f;
-    }
-    while (angle <= -180.0f)
-    {
-        angle += 360.0f;
-    }
-    return angle;
-}
-
-struct PreviewYawParam
-{
-    uint8 near_row;
-    uint8 far_row;
-    float lateral_gain; // 横向纠偏力度
-    float heading_gain; // 提前看弯力度
-    float max_delta_yaw; // 目标角度最大限幅
-};
-
-PreviewYawParam get_preview_yaw_param(TrackScene scene)
-{
-    if (scene == TrackScene::Circle)
-    {
-        if (island_state <= 3)      // 入环
-            return {95, 45, 28.0f, 26.0f, 40.0f};
-        else if (island_state <= 4) // 环内
-            return {85, 55, 22.0f, 16.0f, 30.0f};
-        else                        // 出环
-            return {80, 60, 18.0f, 12.0f, 24.0f};
-    }
-    if (scene == TrackScene::SharpCurve)
-    {
-        return {88, 50, 24.0f, 20.0f, 32.0f};
-    }
-    if (scene == TrackScene::GentleCurve)
-    {
-        return {85, 55, 21.0f, 18.0f, 30.0f};
-    }
-    return {85, 55, 17.0f, 13.0f, 22.0f};
-}
-
-float normalized_midline_error(uint8 row)
-{
-    const int safe_row = std::clamp<int>(row, 0, MT9V03X_H - 1);
-    int mid = End_Mid_Line[safe_row] != 0 ? End_Mid_Line[safe_row] : Mid_Line[safe_row];
-    mid = std::clamp(mid, 0, image_width - 1);
-    return std::clamp((mid - image_width / 2.0f) / (image_width / 2.0f), -1.0f, 1.0f);
-}
-
-float calc_preview_delta_yaw(TrackScene scene)
-{
-    const PreviewYawParam param = get_preview_yaw_param(scene);
-    const float near_error = normalized_midline_error(param.near_row);
-    const float far_error = normalized_midline_error(param.far_row);
-    const float heading_error = far_error - near_error;
-
-    const float delta_yaw = near_error * param.lateral_gain + heading_error * param.heading_gain;
-    return std::clamp(delta_yaw, -param.max_delta_yaw, param.max_delta_yaw);
-}
 
 // 安全读取二值图像素：越界坐标按白色处理，避免八邻域搜线访问数组外。
 uint8 safe_image_pixel(uint8 (*image)[MT9V03X_W], int x, int y)
@@ -195,7 +139,6 @@ void get_turn_point(void);
 void fit_midline(void);
 void HDPJ_lvbo(void);
 void Image_Process(void);
-float Cal_Weigth(void);
 void update_track_lines(void);
 void build_debug_image(bool show_binary);
 
@@ -214,6 +157,12 @@ uint8 End_Mid_Line[MT9V03X_H];
 uint8 Test_Mid_Line[MT9V03X_H];
 int16 Ipm_Left_Line[MT9V03X_H];
 int16 Ipm_Right_Line[MT9V03X_H];
+uint16 Ipm_Left_Points[MT9V03X_H][2];// IPM 左边界点集 [i][0]=X, [i][1]=Y
+uint16 Ipm_Right_Points[MT9V03X_H][2];
+uint16 Ipm_Mid_Points[MT9V03X_H][2];
+uint16 Ipm_Left_Point_Count = 0;
+uint16 Ipm_Right_Point_Count = 0;
+uint16 Ipm_Mid_Point_Count = 0;
 uint8 Road_Wide[MT9V03X_H]; //赛道宽度
 uint8 bin_image_ipm[image_h][image_w];  //
 uint8 sobel_image[MT9V03X_H][MT9V03X_W];
@@ -231,6 +180,7 @@ int Left_Lost_Time  = 0;
 int Both_Lost_Time = 0;//两边同时丢线数
 int point_mode =0; //0突变找点 1向量法找点
 TestMidlineMode g_test_midline_mode = TestMidlineMode::Auto;
+ReliableEdgeMode g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
 uint8 My_Offine=0;
 
 uint16 points_l[(uint16)USE_num][2] = { {  0 } };//左线
@@ -267,8 +217,6 @@ int R_U_corner_angle = 0;//右拐点角度
 uint8 enable_L_D_corner=1,enable_R_D_corner=1;
 uint8 enable_L_U_corner=1,enable_R_U_corner=1;
 
-float Line_Error=0;
-
 uint8 White_col[MT9V03X_W];				//每一列白列长度
 
 Flag_Handle Image_Flag = {false,false,false,false,false,false,false};//元素标志位
@@ -304,6 +252,21 @@ const char *test_midline_mode_name(TestMidlineMode mode)
     }
 }
 
+const char *reliable_edge_mode_name(ReliableEdgeMode mode)
+{
+    switch (mode)
+    {
+    case ReliableEdgeMode::Auto:
+        return "AUTO";
+    case ReliableEdgeMode::ForceLeft:
+        return "LEFT";
+    case ReliableEdgeMode::ForceRight:
+        return "RIGHT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 void cycle_test_midline_mode(void)
 {
     if (g_test_midline_mode == TestMidlineMode::Auto)
@@ -320,6 +283,22 @@ void cycle_test_midline_mode(void)
     }
 }
 
+void cycle_ipm_reliable_edge_mode(void)
+{
+    if (g_ipm_reliable_edge_mode == ReliableEdgeMode::Auto)
+    {
+        g_ipm_reliable_edge_mode = ReliableEdgeMode::ForceLeft;
+    }
+    else if (g_ipm_reliable_edge_mode == ReliableEdgeMode::ForceLeft)
+    {
+        g_ipm_reliable_edge_mode = ReliableEdgeMode::ForceRight;
+    }
+    else
+    {
+        g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
+    }
+}
+
 void cycle_debug_view_mode(void)
 {
     g_debug_show_ipm_lines = !g_debug_show_ipm_lines;
@@ -328,6 +307,264 @@ void cycle_debug_view_mode(void)
 const char *debug_view_mode_name(void)
 {
     return g_debug_show_ipm_lines ? "IPM_LINES" : "NORMAL";
+}
+
+const char *ipm_midline_scene_name(IpmMidlineScene scene)
+{
+    switch (scene)
+    {
+    case IpmMidlineScene::Invalid:
+        return "Invalid";
+    case IpmMidlineScene::Straight:
+        return "Straight";
+    case IpmMidlineScene::GentleCurve:
+        return "GentleCurve";
+    case IpmMidlineScene::SCurve:
+        return "SCurve";
+    case IpmMidlineScene::SharpCurve:
+        return "SharpCurve";
+    default:
+        return "Unknown";
+    }
+}
+
+IpmMidlineSceneResult classify_ipm_midline_scene(const uint16 points[MT9V03X_H][2],
+                                                 uint16 count,
+                                                 uint8 highest)
+{
+    IpmMidlineSceneResult result;
+    result.count = count;
+    result.highest = highest;
+    if (count < 2)
+    {
+        return result;
+    }
+
+    auto clamp01 = [](float value) {
+        return std::clamp(value, 0.0f, 1.0f);
+    };
+    auto point_distance = [&](uint16 a, uint16 b) {
+        const float dx = static_cast<float>(points[b][0]) - static_cast<float>(points[a][0]);
+        const float dy = static_cast<float>(points[b][1]) - static_cast<float>(points[a][1]);
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    auto angle_diff = [](float to, float from) {
+        constexpr float k_pi = 3.14159265358979f;
+        float diff = to - from;
+        while (diff > k_pi)
+        {
+            diff -= 2.0f * k_pi;
+        }
+        while (diff <= -k_pi)
+        {
+            diff += 2.0f * k_pi;
+        }
+        return diff;
+    };
+
+    result.x_min = result.x_max = points[0][0];
+    result.y_min = result.y_max = points[0][1];
+    for (uint16 i = 1; i < count; ++i)
+    {
+        result.x_min = std::min<int>(result.x_min, points[i][0]);
+        result.x_max = std::max<int>(result.x_max, points[i][0]);
+        result.y_min = std::min<int>(result.y_min, points[i][1]);
+        result.y_max = std::max<int>(result.y_max, points[i][1]);
+        result.path_length += point_distance(i - 1, i);
+    }
+
+    result.x_span = result.x_max - result.x_min;
+    result.y_span = result.y_max - result.y_min;
+    result.dx_total = static_cast<int>(points[count - 1][0]) - static_cast<int>(points[0][0]);
+    result.x_y_ratio = static_cast<float>(result.x_span) /
+                       static_cast<float>(std::max(result.y_span, 1));
+    result.chord_length = point_distance(0, count - 1);
+    result.straightness = result.path_length > 1e-3f ? result.chord_length / result.path_length : 0.0f;
+
+    int last_sign = 0;
+    float positive_run = 0.0f;
+    float negative_run = 0.0f;
+    bool positive_confirmed = false;
+    bool negative_confirmed = false;
+    for (uint16 i = 1; i < count; ++i)
+    {
+        const int dx = static_cast<int>(points[i][0]) - static_cast<int>(points[i - 1][0]);
+        int sign = 0;
+        if (dx >= 2)
+        {
+            sign = 1;
+        }
+        else if (dx <= -2)
+        {
+            sign = -1;
+        }
+
+        if (sign == 0)
+        {
+            continue;
+        }
+
+        if (sign > 0)
+        {
+            positive_run += static_cast<float>(std::abs(dx));
+            positive_confirmed = positive_run >= 8.0f;
+        }
+        else
+        {
+            negative_run += static_cast<float>(std::abs(dx));
+            negative_confirmed = negative_run >= 8.0f;
+        }
+
+        if (last_sign != 0 && sign != last_sign)
+        {
+            result.turn_count++;
+        }
+        last_sign = sign;
+    }
+    result.has_reversal = positive_confirmed && negative_confirmed && result.turn_count > 0;
+
+    constexpr uint16 k_curv_span = 3;
+    if (count > k_curv_span * 2)
+    {
+        float abs_curv_sum = 0.0f;
+        int curv_count = 0;
+        for (uint16 i = k_curv_span; i + k_curv_span < count; ++i)
+        {
+            const uint16 prev = i - k_curv_span;
+            const uint16 next = i + k_curv_span;
+            const float ds = point_distance(prev, i) + point_distance(i, next);
+            if (ds < 1e-3f)
+            {
+                continue;
+            }
+
+            const float theta1 = std::atan2(static_cast<float>(points[i][1]) - static_cast<float>(points[prev][1]),
+                                            static_cast<float>(points[i][0]) - static_cast<float>(points[prev][0]));
+            const float theta2 = std::atan2(static_cast<float>(points[next][1]) - static_cast<float>(points[i][1]),
+                                            static_cast<float>(points[next][0]) - static_cast<float>(points[i][0]));
+            const float curv = angle_diff(theta2, theta1) / ds;
+            const float abs_curv = std::fabs(curv);
+            abs_curv_sum += abs_curv;
+            result.signed_curv_sum += curv;
+            result.max_abs_curv = std::max(result.max_abs_curv, abs_curv);
+            curv_count++;
+        }
+
+        if (curv_count > 0)
+        {
+            result.mean_abs_curv = abs_curv_sum / static_cast<float>(curv_count);
+        }
+    }
+
+    const float count_long_score = clamp01((static_cast<float>(count) - 28.0f) / 12.0f);
+    const float count_short_score = clamp01((32.0f - static_cast<float>(count)) / 16.0f);
+    const float y_long_score = clamp01((static_cast<float>(result.y_span) - 65.0f) / 35.0f);
+    const float y_short_score = clamp01((70.0f - static_cast<float>(result.y_span)) / 38.0f);
+    const float lateral_score = clamp01((static_cast<float>(result.x_span) - 14.0f) / 52.0f);
+    const float low_lateral_score = 1.0f - lateral_score;
+    const float straightness_score = clamp01((result.straightness - 0.88f) / 0.10f);
+    const float bend_score = clamp01((result.mean_abs_curv - 0.006f) / 0.020f);
+    const float sharp_curv_score = clamp01((result.max_abs_curv - 0.030f) / 0.060f);
+    const float high_hightest_score = clamp01((static_cast<float>(highest) - 10.0f) / 18.0f);
+    const float reversal_score = result.has_reversal
+                                 ? clamp01((std::min(positive_run, negative_run) - 8.0f) / 20.0f)
+                                 : 0.0f;
+
+    result.straight_score = 0.35f * count_long_score +
+                            0.25f * y_long_score +
+                            0.25f * straightness_score +
+                            0.15f * low_lateral_score;
+    result.s_score = 0.30f * count_long_score +
+                     0.20f * y_long_score +
+                     0.30f * reversal_score +
+                     0.20f * lateral_score;
+    result.sharp_score = 0.32f * count_short_score +
+                         0.30f * y_short_score +
+                         0.22f * lateral_score +
+                         0.16f * sharp_curv_score +
+                         0.06f * high_hightest_score;
+    result.gentle_score = 0.25f * count_long_score +
+                          0.20f * y_long_score +
+                          0.25f * lateral_score +
+                          0.20f * bend_score +
+                          0.10f * (1.0f - reversal_score);
+
+    if (count < 10 || result.y_span < 18 || result.path_length < 18.0f)
+    {
+        result.scene = IpmMidlineScene::Invalid;
+    }
+    else if (result.sharp_score >= result.s_score &&
+             result.sharp_score >= result.straight_score &&
+             result.sharp_score >= result.gentle_score)
+    {
+        result.scene = IpmMidlineScene::SharpCurve;
+    }
+    else if (result.s_score >= result.straight_score &&
+             result.s_score >= result.gentle_score)
+    {
+        result.scene = IpmMidlineScene::SCurve;
+    }
+    else if (result.straight_score >= result.gentle_score)
+    {
+        result.scene = IpmMidlineScene::Straight;
+    }
+    else
+    {
+        result.scene = IpmMidlineScene::GentleCurve;
+    }
+
+    return result;
+}
+
+namespace
+{
+int reliable_edge_lost_score(int lost_count, float lost_ratio)
+{
+    // 第一版只把单边丢线数量和丢线比例作为主依据。
+    return lost_count * 100 + static_cast<int>(lost_ratio * 1000.0f);
+}
+
+void update_ipm_auto_reliable_edge_selection(void)// 根据连续丢线时间和丢线比例自动选择 IPM 可靠边
+{
+    constexpr int k_eval_rows = MT9V03X_H - 3;
+    g_prefill_left_lost_time = Left_Lost_Time;
+    g_prefill_right_lost_time = Right_Lost_Time;
+    g_prefill_left_lost_ratio = static_cast<float>(Left_Lost_Time) / static_cast<float>(k_eval_rows);
+    g_prefill_right_lost_ratio = static_cast<float>(Right_Lost_Time) / static_cast<float>(k_eval_rows);
+
+    const int left_score = reliable_edge_lost_score(g_prefill_left_lost_time, g_prefill_left_lost_ratio);
+    const int right_score = reliable_edge_lost_score(g_prefill_right_lost_time, g_prefill_right_lost_ratio);
+    if (left_score < right_score)
+    {
+        g_ipm_auto_reliable_edge = IpmReliableEdge::Left;
+    }
+    else if (right_score < left_score)
+    {
+        g_ipm_auto_reliable_edge = IpmReliableEdge::Right;
+    }
+    else if (data_stastics_l > data_stastics_r)
+    {
+        g_ipm_auto_reliable_edge = IpmReliableEdge::Left;
+    }
+    else if (data_stastics_r > data_stastics_l)
+    {
+        g_ipm_auto_reliable_edge = IpmReliableEdge::Right;
+    }
+    // 完全打平时保持上一帧选择，避免左右来回跳。
+}
+
+ReliableEdgeMode selected_ipm_reliable_edge_mode(void)
+{
+    if (g_ipm_reliable_edge_mode == ReliableEdgeMode::ForceLeft ||
+            g_ipm_reliable_edge_mode == ReliableEdgeMode::ForceRight)
+    {
+        return g_ipm_reliable_edge_mode;
+    }
+
+    return (g_ipm_auto_reliable_edge == IpmReliableEdge::Left)
+           ? ReliableEdgeMode::ForceLeft
+           : ReliableEdgeMode::ForceRight;
+}
 }
 
 //===================================对边线进行处理
@@ -349,6 +586,10 @@ namespace
         {-0.244732053958449, 8.58083223015027, -50.5084935687455},
         {-0.00215511349918493, 0.0612137810224406, 1},
     };
+    constexpr float k_ipm_sample_distance = 3.0f; // 采样距离
+    constexpr float k_ipm_break_distance = 18.0f;// 断线距离，超过这个距离认为两点不连续
+    constexpr int k_ipm_midline_tangent_span = 2;// 计算中线切线的跨度，单位是点数
+    constexpr float k_ipm_half_road_width = 15.0f; // 当前按 Mat2 和标准宽度估算，后续按实测调整
 
     /*
     double Mat1[3][3]=       { { 0.594503055500757, -0.403675880267065, 9.19372040877073},
@@ -386,15 +627,223 @@ namespace
         ipm_y = static_cast<int>(std::lround(transformed_y));
         return ipm_x >= 0 && ipm_x < MT9V03X_W && ipm_y >= 0 && ipm_y < MT9V03X_H;
     }
+
+    bool is_ipm_continuous(float x1, float y1, float x2, float y2)
+    {
+        const float dx = x2 - x1;
+        const float dy = y2 - y1;
+        return dx * dx + dy * dy <= k_ipm_break_distance * k_ipm_break_distance;
+    }
+
+    bool is_ipm_span_continuous(const uint16 points[MT9V03X_H][2], uint16 start, uint16 end)
+    {
+        for (uint16 i = start + 1; i <= end; ++i)
+        {
+            if (!is_ipm_continuous(points[i - 1][0], points[i - 1][1],
+                                   points[i][0], points[i][1]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void smooth_and_resample_ipm_points(uint16 points[MT9V03X_H][2], uint16 &count)
+    {
+        if (count < 2)
+        {
+            return;
+        }
+
+        float smooth_points[MT9V03X_H][2];
+        for (uint16 i = 0; i < count; ++i)
+        {
+            smooth_points[i][0] = static_cast<float>(points[i][0]);
+            smooth_points[i][1] = static_cast<float>(points[i][1]);
+        }
+
+        for (uint16 i = 1; i + 1 < count; ++i)
+        {
+            if (is_ipm_continuous(points[i - 1][0], points[i - 1][1], points[i][0], points[i][1]) &&
+                    is_ipm_continuous(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1]))
+            {
+                smooth_points[i][0] = (static_cast<float>(points[i - 1][0]) +
+                                       2.0f * static_cast<float>(points[i][0]) +
+                                       static_cast<float>(points[i + 1][0])) * 0.25f;
+                smooth_points[i][1] = (static_cast<float>(points[i - 1][1]) +
+                                       2.0f * static_cast<float>(points[i][1]) +
+                                       static_cast<float>(points[i + 1][1])) * 0.25f;
+            }
+        }
+
+        uint16 resampled[MT9V03X_H][2];
+        uint16 resampled_count = 0;
+        auto append_point = [&](float x, float y) {
+            if (resampled_count >= MT9V03X_H)
+            {
+                return false;
+            }
+            resampled[resampled_count][0] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(x)), 0, MT9V03X_W - 1));
+            resampled[resampled_count][1] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(y)), 0, MT9V03X_H - 1));
+            resampled_count++;
+            return true;
+        };
+        auto append_if_needed = [&](float x, float y) {
+            if (resampled_count == 0)
+            {
+                return append_point(x, y);
+            }
+            const float dx = x - static_cast<float>(resampled[resampled_count - 1][0]);
+            const float dy = y - static_cast<float>(resampled[resampled_count - 1][1]);
+            if (dx * dx + dy * dy > 1.0f)
+            {
+                return append_point(x, y);
+            }
+            return true;
+        };
+
+        append_point(smooth_points[0][0], smooth_points[0][1]);
+        float remain_distance = k_ipm_sample_distance;
+        float last_raw_x = smooth_points[0][0];
+        float last_raw_y = smooth_points[0][1];
+
+        for (uint16 i = 1; i < count && resampled_count < MT9V03X_H; ++i)
+        {
+            float ax = last_raw_x;
+            float ay = last_raw_y;
+            const float bx = smooth_points[i][0];
+            const float by = smooth_points[i][1];
+            float dx = bx - ax;
+            float dy = by - ay;
+            float segment_len = std::sqrt(dx * dx + dy * dy);
+
+            if (segment_len > k_ipm_break_distance)
+            {
+                append_if_needed(ax, ay);
+                append_point(bx, by);
+                remain_distance = k_ipm_sample_distance;
+                last_raw_x = bx;
+                last_raw_y = by;
+                continue;
+            }
+
+            while (segment_len >= remain_distance && segment_len > 1e-3f && resampled_count < MT9V03X_H)
+            {
+                const float t = remain_distance / segment_len;
+                const float sample_x = ax + dx * t;
+                const float sample_y = ay + dy * t;
+                append_point(sample_x, sample_y);
+                ax = sample_x;
+                ay = sample_y;
+                dx = bx - ax;
+                dy = by - ay;
+                segment_len = std::sqrt(dx * dx + dy * dy);
+                remain_distance = k_ipm_sample_distance;
+            }
+
+            if (segment_len > 1e-3f)
+            {
+                remain_distance -= segment_len;
+            }
+            last_raw_x = bx;
+            last_raw_y = by;
+        }
+
+        append_if_needed(last_raw_x, last_raw_y);
+        for (uint16 i = 0; i < resampled_count; ++i)
+        {
+            points[i][0] = resampled[i][0];
+            points[i][1] = resampled[i][1];
+        }
+        count = resampled_count;
+    }
+
+    void build_ipm_offset_midline(const uint16 edge_points[MT9V03X_H][2],
+                                  uint16 edge_count,
+                                  bool from_left_edge)
+    {
+        Ipm_Mid_Point_Count = 0;
+        if (edge_count <= k_ipm_midline_tangent_span * 2)
+        {
+            return;
+        }
+
+        const float direction = from_left_edge ? 1.0f : -1.0f;
+
+        for (uint16 i = k_ipm_midline_tangent_span;
+                i + k_ipm_midline_tangent_span < edge_count && Ipm_Mid_Point_Count < MT9V03X_H; ++i)
+        {
+            const uint16 prev = i - k_ipm_midline_tangent_span;
+            const uint16 next = i + k_ipm_midline_tangent_span;
+            if (!is_ipm_span_continuous(edge_points, prev, next))
+            {
+                continue;
+            }
+
+            const float dx = static_cast<float>(edge_points[next][0]) - static_cast<float>(edge_points[prev][0]);
+            const float dy = static_cast<float>(edge_points[next][1]) - static_cast<float>(edge_points[prev][1]);
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1e-3f)
+            {
+                continue;
+            }
+
+            const float tx = dx / len;
+            const float ty = dy / len;
+            const float nx = -ty;
+            const float ny = tx;
+            const float mid_x = static_cast<float>(edge_points[i][0]) + direction * nx * k_ipm_half_road_width;
+            const float mid_y = static_cast<float>(edge_points[i][1]) + direction * ny * k_ipm_half_road_width;
+            Ipm_Mid_Points[Ipm_Mid_Point_Count][0] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(mid_x)), 0, MT9V03X_W - 1));
+            Ipm_Mid_Points[Ipm_Mid_Point_Count][1] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(mid_y)), 0, MT9V03X_H - 1));
+            Ipm_Mid_Point_Count++;
+        }
+    }
+
+    void draw_ipm_midline(uint16 (*img)[image_width], uint16 color)
+    {
+        for (uint16 i = 1; i < Ipm_Mid_Point_Count; ++i)
+        {
+            if (is_ipm_continuous(Ipm_Mid_Points[i - 1][0], Ipm_Mid_Points[i - 1][1],
+                                  Ipm_Mid_Points[i][0], Ipm_Mid_Points[i][1]))
+            {
+                dbg_line(img, Ipm_Mid_Points[i - 1][0], Ipm_Mid_Points[i - 1][1],
+                         Ipm_Mid_Points[i][0], Ipm_Mid_Points[i][1], color);
+            }
+        }
+    }
+
+}
+
+void build_ipm_midline(ReliableEdgeMode mode)
+{
+    ReliableEdgeMode reliable_edge_mode = mode;
+    if (reliable_edge_mode == ReliableEdgeMode::Auto)
+    {
+        reliable_edge_mode = selected_ipm_reliable_edge_mode();
+    }
+
+    if (reliable_edge_mode == ReliableEdgeMode::ForceLeft)
+    {
+        build_ipm_offset_midline(Ipm_Left_Points, Ipm_Left_Point_Count, true);
+    }
+    else
+    {
+        build_ipm_offset_midline(Ipm_Right_Points, Ipm_Right_Point_Count, false);
+    }
 }
 
 /*
-整条边线转换函数。输入原图行数组形式的 left_line / right_line，逐行把左右边界点通过 transform_image_to_ipm_point() 投影到 IPM 坐标系。输出到 ipm_left_line / ipm_right_line，格式仍然是行数组：
+
+//修改：已经改成点集形式输出到 Ipm_Left_Points / Ipm_Right_Points，同时 ipm_left_line / ipm_right_line 仍然保留行数组格式，记录每行的 IPM x 坐标，便于后续处理。转换过程中会根据可靠性和行优先原则选择点，并统计有效点数量。
+从MT9V03X_H - 4--》》hightest
 */
 void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H], const uint8 right_line[MT9V03X_H], int16 ipm_left_line[MT9V03X_H], int16 ipm_right_line[MT9V03X_H])
 {
     int16 left_source_row[MT9V03X_H];
     int16 right_source_row[MT9V03X_H];
+    Ipm_Left_Point_Count = 0;
+    Ipm_Right_Point_Count = 0;
     for (int row = 0; row < MT9V03X_H; ++row)
     {
         ipm_left_line[row] = -1;
@@ -403,7 +852,7 @@ void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H], const uint8 right_
         right_source_row[row] = -1;
     }
 
-    for (int row = std::max<int>(hightest, 0); row < MT9V03X_H; ++row)
+    for (int row = MT9V03X_H - 4; row >= std::max<int>(hightest, 0); --row)
     {
         const int left = left_line[row];
         const int right = right_line[row];
@@ -411,50 +860,70 @@ void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H], const uint8 right_
         {
             int ipm_x = 0;
             int ipm_y = 0;
-            if (transform_image_to_ipm_point(left, row, ipm_x, ipm_y) &&
-                    (ipm_left_line[ipm_y] < 0 || row > left_source_row[ipm_y]))
+            if (transform_image_to_ipm_point(left, row, ipm_x, ipm_y))
             {
-                ipm_left_line[ipm_y] = static_cast<int16>(ipm_x);
-                left_source_row[ipm_y] = static_cast<int16>(row);
+                if (ipm_left_line[ipm_y] < 0 || row > left_source_row[ipm_y])
+                {
+                    ipm_left_line[ipm_y] = static_cast<int16>(ipm_x);
+                    left_source_row[ipm_y] = static_cast<int16>(row);
+                }
+                if (Ipm_Left_Point_Count < MT9V03X_H)
+                {
+                    Ipm_Left_Points[Ipm_Left_Point_Count][0] = static_cast<uint16>(ipm_x);
+                    Ipm_Left_Points[Ipm_Left_Point_Count][1] = static_cast<uint16>(ipm_y);
+                    Ipm_Left_Point_Count++;
+                }
             }
         }
         if (right > Border_Min && right < Border_Max)
         {
             int ipm_x = 0;
             int ipm_y = 0;
-            if (transform_image_to_ipm_point(right, row, ipm_x, ipm_y) &&
-                    (ipm_right_line[ipm_y] < 0 || row > right_source_row[ipm_y]))
+            if (transform_image_to_ipm_point(right, row, ipm_x, ipm_y))
             {
-                ipm_right_line[ipm_y] = static_cast<int16>(ipm_x);
-                right_source_row[ipm_y] = static_cast<int16>(row);
+                if (ipm_right_line[ipm_y] < 0 || row > right_source_row[ipm_y])
+                {
+                    ipm_right_line[ipm_y] = static_cast<int16>(ipm_x);
+                    right_source_row[ipm_y] = static_cast<int16>(row);
+                }
+                if (Ipm_Right_Point_Count < MT9V03X_H)
+                {
+                    Ipm_Right_Points[Ipm_Right_Point_Count][0] = static_cast<uint16>(ipm_x);
+                    Ipm_Right_Points[Ipm_Right_Point_Count][1] = static_cast<uint16>(ipm_y);
+                    Ipm_Right_Point_Count++;
+                }
             }
         }
     }
+
+    smooth_and_resample_ipm_points(Ipm_Left_Points, Ipm_Left_Point_Count);
+    smooth_and_resample_ipm_points(Ipm_Right_Points, Ipm_Right_Point_Count);
 }
 
-void transform_points_to_ipm_line(const uint16 points[][2], uint16 count, int16 ipm_line[MT9V03X_H])
-{
-    int16 source_row[MT9V03X_H];
-    for (int row = 0; row < MT9V03X_H; ++row)
-    {
-        ipm_line[row] = -1;
-        source_row[row] = -1;
-    }
+//直接将点集转换成 IPM 线数组，保留行优先原则和可靠性选择，但不再输出点集到 Ipm_Left_Points / Ipm_Right_Points。
+// void transform_points_to_ipm_line(const uint16 points[][2], uint16 count, int16 ipm_line[MT9V03X_H])
+// {
+//     int16 source_row[MT9V03X_H];
+//     for (int row = 0; row < MT9V03X_H; ++row)
+//     {
+//         ipm_line[row] = -1;
+//         source_row[row] = -1;
+//     }
 
-    for (uint16 i = 0; i < count; ++i)
-    {
-        const int x = points[i][0];
-        const int y = points[i][1];
-        int ipm_x = 0;
-        int ipm_y = 0;
-        if (transform_image_to_ipm_point(x, y, ipm_x, ipm_y) &&
-                (ipm_line[ipm_y] < 0 || y > source_row[ipm_y]))
-        {
-            ipm_line[ipm_y] = static_cast<int16>(ipm_x);
-            source_row[ipm_y] = static_cast<int16>(y);
-        }
-    }
-}
+//     for (uint16 i = 0; i < count; ++i)
+//     {
+//         const int x = points[i][0];
+//         const int y = points[i][1];
+//         int ipm_x = 0;
+//         int ipm_y = 0;
+//         if (transform_image_to_ipm_point(x, y, ipm_x, ipm_y) &&
+//                 (ipm_line[ipm_y] < 0 || y > source_row[ipm_y]))
+//         {
+//             ipm_line[ipm_y] = static_cast<int16>(ipm_x);
+//             source_row[ipm_y] = static_cast<int16>(y);
+//         }
+//     }
+// }
 
 /*
 黄色测试中线生成函数，只用于图传对比，不参与控制。它根据当前 TestMidlineMode 判断使用左边、右边，还是自动可靠边。现在的版本还是基于原图 Left_Line/Right_Line 做“动态宽度倍率 + 同行偏移”：
@@ -3485,14 +3954,18 @@ void Image_Process(void)
 //	Draw_Line(MT9V03X_W-1, 0,0,MT9V03X_H-5);
     data_stastics_l = 0;
     data_stastics_r = 0;
-    transform_points_to_ipm_line(points_l, 0, Ipm_Left_Line);
-    transform_points_to_ipm_line(points_r, 0, Ipm_Right_Line);
+    Ipm_Left_Point_Count = 0;
+    Ipm_Right_Point_Count = 0;
+    Ipm_Mid_Point_Count = 0;
+    for (int row = 0; row < MT9V03X_H; ++row)
+    {
+        Ipm_Left_Line[row] = -1;
+        Ipm_Right_Line[row] = -1;
+    }
     //check_cheku(90,30,4);									//找斑马线
     if(get_start_point(MT9V03X_H - 2))
     {
         search_l_r((uint16)USE_num,bin_image,&data_stastics_l, &data_stastics_r,start_point_l[0], start_point_l[1], start_point_r[0], start_point_r[1],&hightest);		//八邻域找边界
-        transform_points_to_ipm_line(points_l, data_stastics_l, Ipm_Left_Line);
-        transform_points_to_ipm_line(points_r, data_stastics_r, Ipm_Right_Line);
 
         get_left(data_stastics_l);		//取出边界
         get_right(data_stastics_r);
@@ -3501,6 +3974,7 @@ void Image_Process(void)
 //        get_right_cusp_point();
 //        get_left_cusp_point();
         get_lost_line();						//找左右丢线行数
+        update_ipm_auto_reliable_edge_selection();
 //        Zebra_Stripes_Detect(100,50);
 
 //        if(Image_Flag.Zerba == 1&& complete == 0)
@@ -3528,19 +4002,14 @@ void Image_Process(void)
         Mid_Line[i] = (Right_Line[i] + Left_Line[i]) >> 1;//求中线
        // Road_Wide[i]=Right_Line[i]-Left_Line[i];
     }
+    transform_lines_to_ipm(Left_Line, Right_Line, Ipm_Left_Line, Ipm_Right_Line);
+    build_ipm_midline(g_ipm_reliable_edge_mode);
     build_test_midline(g_test_midline_mode);
 //   print_road_width_calibration();
     fit_midline();
     HDPJ_lvbo();
-    Line_Error = Cal_Weigth();                  // 加权中线偏差（已归一化到 [-1, 1]）
 
 //    clear_block();
-}
-
-// 计算当前中线偏差的统一接口，当前转到 car_control.cpp 的 Cal_Weigth1。
-float Cal_Weigth(void)
-{
-    return Cal_Weigth1();
 }
 
 namespace
@@ -3708,6 +4177,27 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
 {
     const uint16 bg_color = debug_color(RGB565_WHITE);
     const uint16 line_color = debug_color(RGB565_BLACK);
+    const uint16 raw_mid_color = debug_color(RGB565_RED);
+    const uint16 extended_mid_color = debug_color(RGB565_BLUE);
+    const uint16 raw_last_y_color = debug_color(RGB565_CYAN);
+    const uint16 preview_target_color = debug_color(RGB565_RED);
+    auto track_scene_text = [](TrackScene scene) {
+        switch (scene)
+        {
+        case TrackScene::Straight:
+            return "SCN:Straight";
+        case TrackScene::GentleCurve:
+            return "SCN:Gentle";
+        case TrackScene::SharpCurve:
+            return "SCN:Sharp";
+        case TrackScene::Circle:
+            return "SCN:Circle";
+        case TrackScene::LostLine:
+            return "SCN:Lost";
+        default:
+            return "SCN:Unknown";
+        }
+    };
     for (int row = 0; row < image_height; ++row)
     {
         for (int col = 0; col < image_width; ++col)
@@ -3716,17 +4206,93 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
         }
     }
 
-    for (int row = 0; row < MT9V03X_H; ++row)
+    for (uint16 i = 1; i < Ipm_Left_Point_Count; ++i)
     {
-        if (Ipm_Left_Line[row] >= 0)
+        if (is_ipm_continuous(Ipm_Left_Points[i - 1][0], Ipm_Left_Points[i - 1][1],
+                              Ipm_Left_Points[i][0], Ipm_Left_Points[i][1]))
         {
-            dbg_point(img, Ipm_Left_Line[row], row, line_color);
-        }
-        if (Ipm_Right_Line[row] >= 0)
-        {
-            dbg_point(img, Ipm_Right_Line[row], row, line_color);
+            dbg_line(img, Ipm_Left_Points[i - 1][0], Ipm_Left_Points[i - 1][1],
+                     Ipm_Left_Points[i][0], Ipm_Left_Points[i][1], line_color);
         }
     }
+    for (uint16 i = 1; i < Ipm_Right_Point_Count; ++i)
+    {
+        if (is_ipm_continuous(Ipm_Right_Points[i - 1][0], Ipm_Right_Points[i - 1][1],
+                              Ipm_Right_Points[i][0], Ipm_Right_Points[i][1]))
+        {
+            dbg_line(img, Ipm_Right_Points[i - 1][0], Ipm_Right_Points[i - 1][1],
+                     Ipm_Right_Points[i][0], Ipm_Right_Points[i][1], line_color);
+        }
+    }
+
+    draw_ipm_midline(img, raw_mid_color);
+    for (uint16 i = 1; i < Control_Ipm_Extended_Mid_Point_Count && i < MT9V03X_H; ++i)
+    {
+        if (is_ipm_continuous(Control_Ipm_Extended_Mid_Points[i - 1][0],
+                              Control_Ipm_Extended_Mid_Points[i - 1][1],
+                              Control_Ipm_Extended_Mid_Points[i][0],
+                              Control_Ipm_Extended_Mid_Points[i][1]))
+        {
+            dbg_line(img,
+                     Control_Ipm_Extended_Mid_Points[i - 1][0],
+                     Control_Ipm_Extended_Mid_Points[i - 1][1],
+                     Control_Ipm_Extended_Mid_Points[i][0],
+                     Control_Ipm_Extended_Mid_Points[i][1],
+                     extended_mid_color);
+        }
+    }
+    if (Control_Ipm_Extended_Mid_Point_Count > 0)
+    {
+        dbg_cross(img,
+                  Control_Ipm_Extended_Mid_Points[0][0],
+                  Control_Ipm_Extended_Mid_Points[0][1],
+                  extended_mid_color,
+                  3);
+        const uint16 last_idx = std::min<uint16>(Control_Ipm_Extended_Mid_Point_Count, MT9V03X_H) - 1;
+        dbg_cross(img,
+                  Control_Ipm_Extended_Mid_Points[last_idx][0],
+                  Control_Ipm_Extended_Mid_Points[last_idx][1],
+                  extended_mid_color,
+                  3);
+    }
+    if (Control_Ipm_Raw_Last_Valid_Y >= 0 && Control_Ipm_Raw_Last_Valid_Y < MT9V03X_H)
+    {
+        dbg_line(img, 0, Control_Ipm_Raw_Last_Valid_Y, MT9V03X_W - 1,
+                 Control_Ipm_Raw_Last_Valid_Y, raw_last_y_color);
+    }
+    if (Control_Ipm_Preview_Target_Valid)
+    {
+        dbg_circle(img,
+                   Control_Ipm_Preview_Target[0],
+                   Control_Ipm_Preview_Target[1],
+                   5,
+                   preview_target_color);
+    }
+
+    const ReliableEdgeMode reliable_edge_mode = selected_ipm_reliable_edge_mode();
+    if (reliable_edge_mode == ReliableEdgeMode::ForceLeft)
+    {
+        dbg_text_6x8(img, 2, 0, "REL:L", debug_color(RGB565_RED), bg_color, false);
+    }
+    else
+    {
+        dbg_text_6x8(img, 2, 0, "REL:R", debug_color(RGB565_RED), bg_color, false);
+    }
+    char debug_text[32] = {0};
+    std::snprintf(debug_text,
+                  sizeof(debug_text),
+                  "EXT:%u RAWY:%d",
+                  static_cast<unsigned>(Control_Ipm_Extended_Mid_Point_Count),
+                  static_cast<int>(Control_Ipm_Raw_Last_Valid_Y));
+    dbg_text_6x8(img, 2, 10, debug_text, extended_mid_color, bg_color, false);
+
+    char error_text[24] = {0};
+    std::snprintf(error_text, sizeof(error_text), "ERR:%+.1f", Line_Error);
+    dbg_text_6x8(img, image_width - 8 * 6 - 2, 0,
+                 error_text, debug_color(RGB565_PURPLE), bg_color, false);
+    dbg_text_6x8(img, 2, image_height - 8,
+                 track_scene_text(Control_Ipm_Debug_Scene),
+                 debug_color(RGB565_PURPLE), bg_color, false);
 }
 
 // 构建 SCC8660 彩色调试图。只写 debug_image，不回写算法使用的灰度图/二值图。
@@ -3769,48 +4335,6 @@ void reset_track_lines(void)
     //update_track_lines();
 }
 
-// 发布摄像头异常/丢线时的控制结果：保持当前 yaw 并标记 LostLine。
-void publish_lost_line_result(void)
-{
-    std::lock_guard<std::mutex> lock(g_vision_result_mutex);
-    g_track_info.scene = TrackScene::LostLine;
-    g_track_info.deviation = 0.0f;
-    vision_target_yaw = yaw;
-}
-
-// 将视觉中线偏差转换成目标 yaw 和赛道场景，供 scheduler 控制环使用。
-void update_control_target(void)
-{
-    const float deviation = std::clamp(Line_Error, -1.0f, 1.0f);
-
-    TrackScene scene = TrackScene::Straight;
-    const float abs_deviation = std::fabs(deviation);
-    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle)
-    {
-        scene = TrackScene::Circle;
-    }
-    else if (Both_Lost_Time > 55)
-    {
-        scene = TrackScene::LostLine;
-    }
-    else if (abs_deviation > 0.55f)
-    {
-        scene = TrackScene::SharpCurve;
-    }
-    else if (Image_Flag.Cross_Fill || abs_deviation > 0.25f)
-    {
-        scene = TrackScene::GentleCurve;
-    }
-
-    const float delta_yaw = calc_preview_delta_yaw(scene);
-    const float target_yaw = wrap_to_180_local(yaw + delta_yaw);
-    {
-        std::lock_guard<std::mutex> lock(g_vision_result_mutex);
-        g_track_info.deviation = deviation;
-        g_track_info.scene = scene;
-        vision_target_yaw = (scene == TrackScene::LostLine) ? yaw : target_yaw;
-    }
-}
 }
 
 // 将内部 Left/Right/End_Mid_Line 转成图传和控制共用的小写边界数组。
@@ -3834,7 +4358,7 @@ void update_track_lines(void)
 }
 
 // 视觉任务入口：取 UVC 图像、缩放、运行单帧处理，并发布图传/控制数据。
-void image_test(void)
+bool image_test(void)
 {
     static uint8 lost_frame_count = 0;
 
@@ -3842,13 +4366,12 @@ void image_test(void)
     {
         lost_frame_count++;
         std::cout << "摄像头采集异常，连续丢帧: " << static_cast<int>(lost_frame_count) << std::endl;
-        publish_lost_line_result();
         if (lost_frame_count >= k_max_lost_frame_count)
         {
             std::cout << "摄像头连续多次丢帧，程序退出" << std::endl;
             exit(0);
         }
-        return;
+        return false;
     }
     lost_frame_count = 0;
 
@@ -3857,8 +4380,7 @@ void image_test(void)
     {
         std::lock_guard<std::mutex> lock(g_image_mutex);
         reset_track_lines();//
-        publish_lost_line_result();
-        return;//图像异常，跳出循环，保持上次结果不变，等待下一帧图像
+        return false;//图像异常，跳出循环，保持上次结果不变，等待下一帧图像
     }
 
     {
@@ -3873,7 +4395,8 @@ void image_test(void)
         update_circle_integrate_yaw();
         Image_Process();
         update_track_lines();
-        update_control_target();
+        refresh_control_ipm_debug_midline();
         build_debug_image(g_debug_show_binary_image);
     }
+    return true;
 }

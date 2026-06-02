@@ -64,6 +64,12 @@ extern uint8 sobel_image[MT9V03X_H][MT9V03X_W];    // Sobel边缘检测图像
 extern uint8 bin_image_ipm[image_h][image_w];       // IPM逆透视变换后的二值图 100×150
 extern int16 Ipm_Left_Line[MT9V03X_H];              // 原图左边线投影到 160x120 IPM 后的行数组，-1=无效
 extern int16 Ipm_Right_Line[MT9V03X_H];             // 原图右边线投影到 160x120 IPM 后的行数组，-1=无效
+extern uint16 Ipm_Left_Points[MT9V03X_H][2];        // 补线后左边线 IPM 投影、平滑、等距采样后的有序点集 [x,y]
+extern uint16 Ipm_Right_Points[MT9V03X_H][2];       // 补线后右边线 IPM 投影、平滑、等距采样后的有序点集 [x,y]
+extern uint16 Ipm_Mid_Points[MT9V03X_H][2];         // 当前可靠边法向偏移生成的 IPM 中线点集 [x,y]
+extern uint16 Ipm_Left_Point_Count;                 // IPM左边线点数
+extern uint16 Ipm_Right_Point_Count;                // IPM右边线点数
+extern uint16 Ipm_Mid_Point_Count;                  // IPM中线点数
 
 // ============================================================
 //  赛道边线数据（从下到上，行为索引）
@@ -89,8 +95,6 @@ extern uint8 boundary_y_line[image_height];  // 行号标记
 // ============================================================
 extern int Threshold;             // OTSU计算的全局二值化阈值
 extern int Threshold_IPM;         // IPM图像的二值化阈值
-extern float vision_target_yaw;   // 视觉计算的目标偏航角（供角度环使用）
-extern float Line_Error;          // 综合偏差值（Cal_Weigth计算结果）
 extern float Left_K;              // 左边界斜率
 extern float Right_K;             // 右边界斜率
 
@@ -144,7 +148,51 @@ enum class TestMidlineMode : uint8_t
     ForceRight = 2  // 手动强制认为右边可靠
 };
 
+enum class ReliableEdgeMode : uint8_t
+{
+    Auto = 0,       // 自动按可靠边评分选择
+    ForceLeft = 1,  // 手动强制左边为可靠边
+    ForceRight = 2  // 手动强制右边为可靠边
+};
+
+enum class IpmMidlineScene : uint8_t
+{
+    Invalid = 0,     // 点数或可见长度不足，暂不可信
+    Straight = 1,    // 长且整体平直
+    GentleCurve = 2, // 长且单方向弯曲，包含缓弯
+    SCurve = 3,      // 长且存在明显左右换向
+    SharpCurve = 4   // 可见长度短，或横向变化相对纵向变化很大
+};
+
+struct IpmMidlineSceneResult
+{
+    IpmMidlineScene scene = IpmMidlineScene::Invalid;
+    uint16 count = 0;
+    uint8 highest = 0;
+    int x_min = 0;
+    int x_max = 0;
+    int y_min = 0;
+    int y_max = 0;
+    int x_span = 0;
+    int y_span = 0;
+    int dx_total = 0;
+    int turn_count = 0;
+    bool has_reversal = false;
+    float x_y_ratio = 0.0f;
+    float path_length = 0.0f;
+    float chord_length = 0.0f;
+    float straightness = 0.0f;      // 首尾直线距离 / 折线长度，越接近1越直
+    float mean_abs_curv = 0.0f;     // 平均绝对曲率，单位约为 1/IPM像素
+    float max_abs_curv = 0.0f;      // 最大局部曲率，单位约为 1/IPM像素
+    float signed_curv_sum = 0.0f;   // 曲率带符号累计，正负表示总体弯向
+    float straight_score = 0.0f;
+    float gentle_score = 0.0f;
+    float s_score = 0.0f;
+    float sharp_score = 0.0f;
+};
+
 extern TestMidlineMode g_test_midline_mode;
+extern ReliableEdgeMode g_ipm_reliable_edge_mode;
 
 // ============================================================
 //  核心视觉处理函数
@@ -155,17 +203,23 @@ void image_filter(uint8 (*image)[MT9V03X_W]);                 // 3×3形态学�
 void image_draw_rectan(uint8 (*image)[MT9V03X_W]);            // 在图像左右边和顶部绘制黑框（防止搜索越界）
 void update_track_lines(void);                                // 将Left/Right_Line映射到边缘/中线像素坐标数组
 void build_debug_image(bool show_binary = false);                // 构建 RGB565 彩色调试图
-void Image_Process(void);                                     // 图像处理总入口（二值化→搜索边线→拐点→元素识别）
-void image_test(void);                                        // 视觉主循环函数（采集→处理→输出控制目标）
-float Cal_Weigth(void);                                       // 计算综合偏差权重Line_Error
+void Image_Process(void);                                     // 图像处理总入口（二值化→搜索边线→拐点→元素识别→最终中线）
+bool image_test(void);                                        // 视觉主循环函数（成功返回true，采集异常返回false）
 void build_test_midline(TestMidlineMode mode);                 // 生成可靠边偏移测试中线，不参与控制
 void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
                             const uint8 right_line[MT9V03X_H],
                             int16 ipm_left_line[MT9V03X_H],
                             int16 ipm_right_line[MT9V03X_H]);     // 将原图左右边线投影成 160x120 IPM 行数组
+void build_ipm_midline(ReliableEdgeMode mode);                  // 按自动/手动可靠边生成 IPM 中线点集
 void cycle_test_midline_mode(void);                            // 键盘调试：切换测试中线可靠边模式
 const char *test_midline_mode_name(TestMidlineMode mode);      // 返回测试中线模式名
+void cycle_ipm_reliable_edge_mode(void);                       // 键盘调试：切换IPM可靠边选择模式
+const char *reliable_edge_mode_name(ReliableEdgeMode mode);    // 返回IPM可靠边模式名
 void cycle_debug_view_mode(void);                              // 键盘调试：切换普通图传/IPM边线图
 const char *debug_view_mode_name(void);                        // 返回当前图传显示模式名
+IpmMidlineSceneResult classify_ipm_midline_scene(const uint16 points[MT9V03X_H][2],
+                                                 uint16 count,
+                                                 uint8 highest); // 只根据IPM中线点集做路径形状粗分类，不参与控制
+const char *ipm_midline_scene_name(IpmMidlineScene scene);       // 返回IPM中线路径形状名
 
 #endif
