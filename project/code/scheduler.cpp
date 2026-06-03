@@ -91,7 +91,9 @@ void master_scheduler_callback()
 
         float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt); // PID 角度环计算
         float base_speed = calc_base_speed(local_track_info);                   // 速度策略计算
-        steer = std::clamp(steer, -base_speed, base_speed);                     // 软件限幅，防止转向过猛
+
+        constexpr float k_max_steer_ratio = 0.6f;// 转向修正最大占比，防止过度转向导致车轮抱死或侧滑失控
+        steer = std::clamp(steer, -base_speed * k_max_steer_ratio, base_speed * k_max_steer_ratio);
         // // ==========================================================
         // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
         // ==========================================================

@@ -68,7 +68,7 @@ int main(int, char **)
     // esc_init();
     //esc_set_speed_percent(0);
      imu_init();
-      Encoder_Init();
+     Encoder_Init();
      Beep_Init();
      motor_init();
         // if (tcp_debug_init("192.168.31.20", 8086))
@@ -107,13 +107,15 @@ int main(int, char **)
 
     // 启动中央大脑！全车所有模块开始按时间片同步运转
     scheduler_init();
-    //test_front_point_patch_tools();
+    Set_Beepfreq(3);
+    // test_front_point_patch_tools();
 
     while (1)
     {
 
-        keyboard_poll_simple();// 轮询键盘输入，供调试用
-       // esc_set_speed_percent(test1);
+        //Set_Beeptime(5000);      // 响 500ms
+        keyboard_poll_simple(); // 轮询键盘输入，供调试用
+                                // esc_set_speed_percent(test1);
         fps_timer_start();
         if (image_test())
         {

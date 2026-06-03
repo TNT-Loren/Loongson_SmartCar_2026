@@ -565,6 +565,42 @@ ReliableEdgeMode selected_ipm_reliable_edge_mode(void)
            ? ReliableEdgeMode::ForceLeft
            : ReliableEdgeMode::ForceRight;
 }
+
+ReliableEdgeMode effective_ipm_reliable_edge_mode(void)
+{
+    if (Image_Flag.Left_Circle)
+    {
+        if (island_state == 1||island_state == 2)
+        {
+            return ReliableEdgeMode::ForceRight;
+        }
+        if ( island_state == 3)
+        {
+            return ReliableEdgeMode::ForceLeft;
+        }
+        if (island_state == 4)
+        {
+            return ReliableEdgeMode::Auto;
+        }
+    }
+    if (Image_Flag.Right_Circle)
+    {
+        if (island_state == 1 || island_state == 2)
+        {
+            return ReliableEdgeMode::ForceLeft;
+        }
+        if (island_state == 3)
+        {
+            return ReliableEdgeMode::ForceRight;
+        }
+        if (island_state == 4)
+        {
+            return ReliableEdgeMode::Auto;
+        }
+    }
+
+    return g_ipm_reliable_edge_mode;
+}
 }
 
 //===================================对边线进行处理
@@ -582,10 +618,15 @@ namespace
     //mat2
     constexpr double k_image_to_ipm_mat[3][3] =
     {
-        {1.54922851132135, 4.87986157380177, -49.7605197103311},
-        {-0.244732053958449, 8.58083223015027, -50.5084935687455},
-        {-0.00215511349918493, 0.0612137810224406, 1},
+        {2.07106274007683, 5.57618437900129, -91.1235595390527},
+        {-0.186299615877078, 10.0601792573624, -89.3271446862998},
+        {-0.00128040973111394, 0.0691421254801537, 1},
     };
+
+    // {1.54922851132135, 4.87986157380177, -49.7605197103311},
+    // {-0.244732053958449, 8.58083223015027, -50.5084935687455},
+    // -0.00215511349918493, 0.0612137810224406, 1},
+
     constexpr float k_ipm_sample_distance = 3.0f; // 采样距离
     constexpr float k_ipm_break_distance = 18.0f;// 断线距离，超过这个距离认为两点不连续
     constexpr int k_ipm_midline_tangent_span = 2;// 计算中线切线的跨度，单位是点数
@@ -4003,7 +4044,7 @@ void Image_Process(void)
        // Road_Wide[i]=Right_Line[i]-Left_Line[i];
     }
     transform_lines_to_ipm(Left_Line, Right_Line, Ipm_Left_Line, Ipm_Right_Line);
-    build_ipm_midline(g_ipm_reliable_edge_mode);
+    build_ipm_midline(effective_ipm_reliable_edge_mode());
     build_test_midline(g_test_midline_mode);
 //   print_road_width_calibration();
     fit_midline();
@@ -4269,7 +4310,11 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
                    preview_target_color);
     }
 
-    const ReliableEdgeMode reliable_edge_mode = selected_ipm_reliable_edge_mode();
+    ReliableEdgeMode reliable_edge_mode = effective_ipm_reliable_edge_mode();
+    if (reliable_edge_mode == ReliableEdgeMode::Auto)
+    {
+        reliable_edge_mode = selected_ipm_reliable_edge_mode();
+    }
     if (reliable_edge_mode == ReliableEdgeMode::ForceLeft)
     {
         dbg_text_6x8(img, 2, 0, "REL:L", debug_color(RGB565_RED), bg_color, false);

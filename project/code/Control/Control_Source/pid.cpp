@@ -1,8 +1,8 @@
 #include "pid.hpp"
 #include <cmath> // 用于 std::abs
 
-IncrementalPID pid_left(0.6f, 0.2f, 0.0f, 60.0f);
-IncrementalPID pid_right(0.6f, 0.2f, 0.0f, 60.0f);
+IncrementalPID pid_left(0.6f, 0.3f, 0.0f, 60.0f);
+IncrementalPID pid_right(0.6f, 0.3f, 0.0f, 60.0f);
 PositionalPID pid_angle(3.5f, 0.3f, 0.2f, 100.0f, 30.0f);
 
 /*

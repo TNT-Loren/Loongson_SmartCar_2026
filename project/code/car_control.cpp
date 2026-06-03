@@ -26,7 +26,7 @@ constexpr float k_ipm_control_sample_distance = 3.0f;
 constexpr float k_ipm_control_break_distance = 18.0f;
 constexpr uint16 k_ipm_control_max_points = 30;
 // IPM 控制坐标系下的车身参考点：pure pursuit 的所有角度都从这里指向预瞄点。
-constexpr float k_vehicle_x = 80.0f;
+constexpr float k_vehicle_x = 79.0f;
 constexpr float k_vehicle_y = 119.0f;
 constexpr float k_pi = 3.14159265358979323846f;
 constexpr uint16 k_control_work_capacity = MT9V03X_H + 2;
@@ -70,7 +70,7 @@ LegacyPreviewYawParam get_legacy_preview_yaw_param(TrackScene scene)
     }
     if (scene == TrackScene::SharpCurve)
     {
-        return {25.0f, 17.0f, 35.0f};
+        return {27.0f, 17.0f, 35.0f};
     }
     if (scene == TrackScene::GentleCurve)
     {
@@ -91,15 +91,24 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
         else                        // 出环
             return {28.0f, 30.0f};
     }
+    // if (scene == TrackScene::SharpCurve)
+    // {
+    //     return {24.0f, 42.0f};
+    // }
+    // if (scene == TrackScene::GentleCurve)
+    // {
+    //     return {34.0f, 35.0f};
+    // }
+    // return {45.0f, 25.0f};
     if (scene == TrackScene::SharpCurve)
     {
-        return {24.0f, 42.0f};
+        return {34.0f, 35.0f};
     }
     if (scene == TrackScene::GentleCurve)
     {
         return {34.0f, 35.0f};
     }
-    return {45.0f, 25.0f};
+    return {34.0f, 35.0f};
 }
 
 float point_distance(float x1, float y1, float x2, float y2)
