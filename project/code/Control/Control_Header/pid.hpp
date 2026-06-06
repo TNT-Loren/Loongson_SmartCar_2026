@@ -46,6 +46,7 @@ public:
     void clear();
 
     float calc(float target, float current, float dt);
+    float calc(float target, float current, float dt, float dynamic_output_limit);
 
     //用于观测积分项健康度的接口
     float get_integral() const { return integral; }

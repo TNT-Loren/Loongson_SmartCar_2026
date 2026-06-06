@@ -89,11 +89,11 @@ void master_scheduler_callback()
             local_track_info = g_track_info;
         } //离开作用域 → lock 析构 → 自动解锁
 
-        float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt); // PID 角度环计算
-        float base_speed = calc_base_speed(local_track_info);                   // 速度策略计算
-
-        constexpr float k_max_steer_ratio = 0.6f;// 转向修正最大占比，防止过度转向导致车轮抱死或侧滑失控
-        steer = std::clamp(steer, -base_speed * k_max_steer_ratio, base_speed * k_max_steer_ratio);
+        float base_speed = calc_base_speed(local_track_info); // 速度策略计算
+        constexpr float k_max_steer_ratio = 0.67f;// 转向修正最大占比，防止过度转向导致车轮抱死或侧滑失控
+        const float steer_limit = base_speed * k_max_steer_ratio;
+        float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt, steer_limit); // PID 角度环计算
+        //steer = std::clamp(steer, -steer_limit, steer_limit);
         // // ==========================================================
         // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
         // ==========================================================

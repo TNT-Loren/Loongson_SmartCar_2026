@@ -129,23 +129,30 @@ int main(int, char **)
         // motor_set_speed(30, 30);
         if (need_print.load() == 1)
         {
-            TrackInfo track_info;
-            float local_yaw = 0.0f;
-            float local_target_yaw = 0.0f;
-            {
-                std::lock_guard<std::mutex> lock(g_vision_result_mutex);
-                track_info = g_track_info;
-                local_yaw = yaw;
-                local_target_yaw = vision_target_yaw;
-            }
-            const float relative_yaw_error = wrap_delta_yaw_for_print(local_target_yaw - local_yaw);
+            // TrackInfo track_info;
+            // float local_yaw = 0.0f;
+            // float local_target_yaw = 0.0f;
+            // {
+            //     std::lock_guard<std::mutex> lock(g_vision_result_mutex);
+            //     track_info = g_track_info;
+            //     local_yaw = yaw;
+            //     local_target_yaw = vision_target_yaw;
+            // }
+            // const float relative_yaw_error = wrap_delta_yaw_for_print(local_target_yaw - local_yaw);
 
-            std::cout << "  scene: " << track_scene_name(track_info.scene)
-                      << "   fps: " << g_fps_value
-                      << "  rel_yaw_error: " << relative_yaw_error
-                      << "  deviation: " << track_info.deviation
-                      << std::endl;
-            need_print.store(0);
+            // std::cout << "  scene: " << track_scene_name(track_info.scene)
+            //           << "   fps: " << g_fps_value
+            //           << "  rel_yaw_error: " << relative_yaw_error
+            //           << "  deviation: " << track_info.deviation
+            //           << std::endl;
+            // for(uint8 i=0;i<MT9V03X_H;i++)
+            // {
+            //     std::cout << static_cast<int>(Mid_Line[i]) << " ,";
+            // }
+            // std::cout << "  " << std::endl;
+            // std::cout << "  " << std::endl;
+             
+            std::cout << static_cast<int>(Threshold) << std::endl;need_print.store(0);
         }
         system_delay_ms(10);
     }

@@ -24,7 +24,7 @@ namespace
 {
 constexpr float k_ipm_control_sample_distance = 3.0f;
 constexpr float k_ipm_control_break_distance = 18.0f;
-constexpr uint16 k_ipm_control_max_points = 30;
+constexpr uint16 k_ipm_control_max_points = 25;
 // IPM 控制坐标系下的车身参考点：pure pursuit 的所有角度都从这里指向预瞄点。
 constexpr float k_vehicle_x = 79.0f;
 constexpr float k_vehicle_y = 119.0f;
@@ -62,11 +62,11 @@ LegacyPreviewYawParam get_legacy_preview_yaw_param(TrackScene scene)
     if (scene == TrackScene::Circle)
     {
         if (island_state <= 3)      // 入环
-            return {28.0f, 26.0f, 40.0f};
+            return {18.0f, 26.0f, 40.0f};
         else if (island_state <= 4) // 环内
-            return {22.0f, 16.0f, 30.0f};
+            return {18.0f, 16.0f, 30.0f};
         else                        // 出环
-            return {18.0f, 12.0f, 24.0f};
+            return {18.0f, 12.0f, 30.0f};
     }
     if (scene == TrackScene::SharpCurve)
     {
@@ -82,33 +82,29 @@ LegacyPreviewYawParam get_legacy_preview_yaw_param(TrackScene scene)
 PurePursuitParam get_pure_pursuit_param(TrackScene scene)
 {
     // 预瞄距离按场景固定给初值。急弯/环内刻意短一些，避免远端外推线过早主导转向。
+    if (scene == TrackScene::LostLine)
+    {
+        return {47.0f, 35.0f};
+    }
     if (scene == TrackScene::Circle)
     {
         if (island_state <= 3)      // 入环，稍远一点看入口趋势
-            return {30.0f, 40.0f};
+            return {34.0f, 40.0f};
         else if (island_state <= 4) // 环内，短预瞄避免外推线主导
-            return {22.0f, 34.0f};
+            return {34.0f, 34.0f};
         else                        // 出环
-            return {28.0f, 30.0f};
+            return {34.0f, 30.0f};
     }
-    // if (scene == TrackScene::SharpCurve)
-    // {
-    //     return {24.0f, 42.0f};
-    // }
-    // if (scene == TrackScene::GentleCurve)
-    // {
-    //     return {34.0f, 35.0f};
-    // }
-    // return {45.0f, 25.0f};
+
     if (scene == TrackScene::SharpCurve)
     {
-        return {34.0f, 35.0f};
+        return {40.0f, 35.0f};
     }
     if (scene == TrackScene::GentleCurve)
     {
-        return {34.0f, 35.0f};
+        return {44.0f, 35.0f};
     }
-    return {34.0f, 35.0f};
+    return {44.2f, 35.0f};
 }
 
 float point_distance(float x1, float y1, float x2, float y2)
@@ -454,18 +450,20 @@ float calc_legacy_preview_delta_yaw(TrackScene scene)
     return std::clamp(delta_yaw, -param.max_delta_yaw, param.max_delta_yaw);
 }
 
-bool calc_preview_target_yaw(TrackScene scene,
-                             float &target_yaw,
-                             float &alpha_deg,
-                             uint16 preview_target[2])
+bool calc_preview_target_yaw_from_points(const uint16 mid_points[MT9V03X_H][2],
+                                         uint16 mid_count,
+                                         TrackScene scene,
+                                         float &target_yaw,
+                                         float &alpha_deg,
+                                         uint16 preview_target[2])
 {
     // 新控制主路径：IPM 中线点集 -> 控制侧补全/外推 -> 按预瞄距离取 target -> atan2 得到角度误差。
     uint16 extended_points[MT9V03X_H][2] = {{0}};
     uint16 extended_count = 0;
     int16 line_x_by_y[MT9V03X_H] = {0};
     int16 raw_last_valid_y = -1;
-    if (!extend_ipm_midline(Ipm_Mid_Points,
-                            Ipm_Mid_Point_Count,
+    if (!extend_ipm_midline(mid_points,
+                            mid_count,
                             extended_points,
                             extended_count,
                             line_x_by_y,
@@ -498,6 +496,19 @@ bool calc_preview_target_yaw(TrackScene scene,
     (void)line_x_by_y;
     (void)raw_last_valid_y;
     return true;
+}
+
+bool calc_preview_target_yaw(TrackScene scene,
+                             float &target_yaw,
+                             float &alpha_deg,
+                             uint16 preview_target[2])
+{
+    return calc_preview_target_yaw_from_points(Ipm_Mid_Points,
+                                               Ipm_Mid_Point_Count,
+                                               scene,
+                                               target_yaw,
+                                               alpha_deg,
+                                               preview_target);
 }
 }
 
@@ -673,7 +684,8 @@ void update_control_target(void)
     {
         scene = TrackScene::Circle;
     }
-    else if (Both_Lost_Time > 55)
+    // else if (Both_Lost_Time > 55) // 旧逻辑：补线前八邻域双边贴边行数。
+    else if (is_lost_line())
     {
         scene = TrackScene::LostLine;
     }
@@ -703,6 +715,18 @@ void update_control_target(void)
     float alpha_deg = 0.0f;
     uint16 preview_target[2] = {0, 0};
     bool preview_target_valid = false;
+    bool lost_line_ipm_fallback_valid = false;
+    if (scene == TrackScene::LostLine)
+    {
+        lost_line_ipm_fallback_valid =
+            calc_preview_target_yaw_from_points(Ipm_Bilateral_Mid_Points,
+                                                Ipm_Bilateral_Mid_Point_Count,
+                                                scene,
+                                                target_yaw,
+                                                alpha_deg,
+                                                preview_target);
+        preview_target_valid = lost_line_ipm_fallback_valid;
+    }
     if (scene != TrackScene::LostLine &&
         calc_preview_target_yaw(scene, target_yaw, alpha_deg, preview_target))
     {
@@ -717,14 +741,14 @@ void update_control_target(void)
 
     std::lock_guard<std::mutex> lock(g_vision_result_mutex);
     // 对外发布的 deviation/Line_Error 现在都是角度误差，单位是度，不再是 [-1,1] 归一化横偏。
-    Line_Error = (scene == TrackScene::LostLine) ? 0.0f : alpha_deg;
+    Line_Error = (scene == TrackScene::LostLine && !lost_line_ipm_fallback_valid) ? 0.0f : alpha_deg;
     g_track_info.deviation = Line_Error;
     g_track_info.scene = scene;
     Control_Ipm_Debug_Scene = scene;
     Control_Ipm_Preview_Target_Valid = preview_target_valid;
     Control_Ipm_Preview_Target[0] = preview_target[0];
     Control_Ipm_Preview_Target[1] = preview_target[1];
-    vision_target_yaw = (scene == TrackScene::LostLine) ? yaw : target_yaw;
+    vision_target_yaw = (scene == TrackScene::LostLine && !lost_line_ipm_fallback_valid) ? yaw : target_yaw;
     if (g_debug_show_ipm_lines)
     {
         build_debug_image(g_debug_show_binary_image);

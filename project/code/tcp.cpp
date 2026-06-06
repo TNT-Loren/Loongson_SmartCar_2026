@@ -64,8 +64,9 @@ bool tcp_image_transmission_init(const char *ip, int port)
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
 
         seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660, debug_image[0], image_width, image_height);
-       //  seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], image_width, image_height);
-        return true;
+          //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], image_width, image_height);
+        // seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], image_width, image_height);
+         return true;
     }
     else
     {

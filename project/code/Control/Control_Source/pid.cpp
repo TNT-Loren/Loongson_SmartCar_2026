@@ -107,6 +107,11 @@ static float wrap180f(float a)
 
 float PositionalPID::calc(float target, float current, float dt)
 {
+    return calc(target, current, dt, output_limit);
+}
+
+float PositionalPID::calc(float target, float current, float dt, float dynamic_output_limit)//
+{
    // float error = target - current;
    float error = wrap180f(target - current);
    // 很好的死区处理：进入死区就直接输出 0，并且刷新 last_error 防止微分暴走
@@ -118,6 +123,7 @@ float PositionalPID::calc(float target, float current, float dt)
        return 0.0f;
    }
 
+    const float previous_integral = integral;
     integral += (error * dt);
     integral = std::clamp(integral, -integral_limit, integral_limit);
 
@@ -129,7 +135,18 @@ float PositionalPID::calc(float target, float current, float dt)
                    (ki * integral) +
                    (kd * derivative);
 
-    output = std::clamp(output, -output_limit, output_limit);
+    const float effective_output_limit = std::clamp(std::abs(dynamic_output_limit), 0.0f, output_limit);
+    const float limited_output = std::clamp(output, -effective_output_limit, effective_output_limit);
+    if ((limited_output >= effective_output_limit && error > 0.0f) ||
+        (limited_output <= -effective_output_limit && error < 0.0f))
+    {
+        integral = previous_integral;
+        output = (kp * error) +
+                 (ki * integral) +
+                 (kd * derivative);
+    }
+
+    output = std::clamp(output, -effective_output_limit, effective_output_limit);
     last_error = error;
 
     return output;

@@ -17,17 +17,17 @@ namespace
     // constexpr float k_speed_sharp = 105.0f;
     // constexpr float k_speed_lost = 90.0f;
 
-    constexpr float k_speed_straight = 100.0f;
-    constexpr float k_speed_curve = 70.0f;
-    constexpr float k_speed_sharp = 60.0f;
-    constexpr float k_speed_circle = 60.0f;
-    constexpr float k_speed_lost = 60.0f;
+    constexpr float k_speed_straight = 120.0f;
+    constexpr float k_speed_curve = 90.0f;
+    constexpr float k_speed_sharp = 80.0f;
+    constexpr float k_speed_circle = 80.0f;
+    constexpr float k_speed_lost = 80.0f;
 
-    // constexpr float k_speed_straight = 50.0f;
-    // constexpr float k_speed_curve = 40.0f;
-    // constexpr float k_speed_sharp = 40.0f;
-    // constexpr float k_speed_circle = 40.0f;
-    // constexpr float k_speed_lost = 40.0f;
+    // constexpr float k_speed_straight = 90.0f;
+    // constexpr float k_speed_curve = 80.0f;
+    // constexpr float k_speed_sharp = 75.0f;
+    // constexpr float k_speed_circle = 75.0f;
+    // constexpr float k_speed_lost = 50.0f;
 
     // 加减速步长限制（非对称平滑）
     constexpr float k_speed_up_step = 8.0f;
@@ -38,7 +38,7 @@ namespace
 
 float calc_base_speed(const TrackInfo &info)
 {
-    static float base_speed = 70.0f; // 初始起步速度
+    static float base_speed = 120.0f; // 初始起步速度
 
     float target = k_speed_straight;
 
@@ -46,7 +46,8 @@ float calc_base_speed(const TrackInfo &info)
     if (info.scene == TrackScene::LostLine)
     {
         target = k_speed_lost;
-      //  test3 = 0;
+        Set_Beepfreq(3);
+        //  test3 = 0;
     }
     else if (info.scene == TrackScene::SharpCurve)
     {
@@ -79,5 +80,5 @@ float calc_base_speed(const TrackInfo &info)
     delta = std::clamp(delta, -k_speed_down_step, k_speed_up_step);
     base_speed += delta;
 
-    return target;
+    return base_speed;
 }

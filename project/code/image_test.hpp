@@ -67,9 +67,11 @@ extern int16 Ipm_Right_Line[MT9V03X_H];             // 原图右边线投影到 
 extern uint16 Ipm_Left_Points[MT9V03X_H][2];        // 补线后左边线 IPM 投影、平滑、等距采样后的有序点集 [x,y]
 extern uint16 Ipm_Right_Points[MT9V03X_H][2];       // 补线后右边线 IPM 投影、平滑、等距采样后的有序点集 [x,y]
 extern uint16 Ipm_Mid_Points[MT9V03X_H][2];         // 当前可靠边法向偏移生成的 IPM 中线点集 [x,y]
+extern uint16 Ipm_Bilateral_Mid_Points[MT9V03X_H][2]; // 丢线兜底：左右 IPM 行数组相加除以2生成的中线点集 [x,y]
 extern uint16 Ipm_Left_Point_Count;                 // IPM左边线点数
 extern uint16 Ipm_Right_Point_Count;                // IPM右边线点数
 extern uint16 Ipm_Mid_Point_Count;                  // IPM中线点数
+extern uint16 Ipm_Bilateral_Mid_Point_Count;         // 丢线兜底 IPM 双边平均中线点数
 
 // ============================================================
 //  赛道边线数据（从下到上，行为索引）
@@ -205,6 +207,7 @@ void update_track_lines(void);                                // 将Left/Right_L
 void build_debug_image(bool show_binary = false);                // 构建 RGB565 彩色调试图
 void Image_Process(void);                                     // 图像处理总入口（二值化→搜索边线→拐点→元素识别→最终中线）
 bool image_test(void);                                        // 视觉主循环函数（成功返回true，采集异常返回false）
+bool is_lost_line(void);                                      // 基于补线后的当前左右边线判断是否最终丢线
 void build_test_midline(TestMidlineMode mode);                 // 生成可靠边偏移测试中线，不参与控制
 void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H],
                             const uint8 right_line[MT9V03X_H],
