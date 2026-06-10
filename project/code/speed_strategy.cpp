@@ -7,27 +7,28 @@ TrackInfo g_track_info;
 namespace
 {
     // 基础目标车速配置
-    // constexpr float k_speed_straight = 150.0f;
+    // constexpr float k_speed_straight = 130.0f;
     // constexpr float k_speed_curve = 125.0f;
     // constexpr float k_speed_sharp = 110.0f;
-    // constexpr float k_speed_lost = 90.0f;
+    //  constexpr float k_speed_circle = 105.0f;
+    // constexpr float k_speed_lost = 100.0f;
 
     // constexpr float k_speed_straight = 130.0f;
     // constexpr float k_speed_curve = 115.0f;
     // constexpr float k_speed_sharp = 105.0f;
     // constexpr float k_speed_lost = 90.0f;
 
-    constexpr float k_speed_straight = 120.0f;
-    constexpr float k_speed_curve = 90.0f;
-    constexpr float k_speed_sharp = 80.0f;
-    constexpr float k_speed_circle = 80.0f;
-    constexpr float k_speed_lost = 80.0f;
+    constexpr float k_speed_straight = 130.0f;//aaa
+    constexpr float k_speed_curve = 100.0f;
+    constexpr float k_speed_sharp = 90.0f;
+    constexpr float k_speed_circle = 95.0f;
+    constexpr float k_speed_lost = 95.0f;
 
-    // constexpr float k_speed_straight = 90.0f;
-    // constexpr float k_speed_curve = 80.0f;
-    // constexpr float k_speed_sharp = 75.0f;
-    // constexpr float k_speed_circle = 75.0f;
-    // constexpr float k_speed_lost = 50.0f;
+    // constexpr float k_speed_straight = 50.0f;
+    // constexpr float k_speed_curve = 40.0f;
+    // constexpr float k_speed_sharp = 40.0f;
+    // constexpr float k_speed_circle = 40.0f;
+    // constexpr float k_speed_lost = 30.0f;
 
     // 加减速步长限制（非对称平滑）
     constexpr float k_speed_up_step = 8.0f;

@@ -1,10 +1,12 @@
 #include "tcp.hpp"
 #include "image_test.hpp"
 #include <atomic>
+#include <cstring>
 
 // 静态对象，仅在当前文件内可见，符合封装原则
 zf_driver_tcp_client tcp_client_dev;
 static std::atomic<bool> g_tcp_camera_send_failed(false);
+static uint16 g_tcp_camera_image[image_height][image_width] = {{0}};
 
 // 指针池：用于保存外部需要监控的变量地址
 static float *monitor_ch[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -63,8 +65,8 @@ bool tcp_image_transmission_init(const char *ip, int port)
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
 
-        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660, debug_image[0], image_width, image_height);
-          //seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], image_width, image_height);
+       seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660, g_tcp_camera_image[0], image_width, image_height);
+         // seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], image_width, image_height);
         // seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], image_width, image_height);
          return true;
     }
@@ -75,6 +77,14 @@ bool tcp_image_transmission_init(const char *ip, int port)
     }
 
 }
+
+// 将当前调试图复制到 TCP 专用缓冲区，避免网络发送期间占用图像锁。
+void tcp_camera_snapshot_debug_image(void)
+{
+    std::lock_guard<std::mutex> lock(g_image_mutex);
+    std::memcpy(g_tcp_camera_image, debug_image, sizeof(g_tcp_camera_image));
+}
+
 //读取故障状态的同时把它清零
 bool tcp_camera_send_failed(void)
 {

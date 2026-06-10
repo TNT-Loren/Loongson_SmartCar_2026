@@ -27,7 +27,7 @@ constexpr float k_ipm_control_break_distance = 18.0f;
 constexpr uint16 k_ipm_control_max_points = 25;
 // IPM 控制坐标系下的车身参考点：pure pursuit 的所有角度都从这里指向预瞄点。
 constexpr float k_vehicle_x = 79.0f;
-constexpr float k_vehicle_y = 119.0f;
+constexpr float k_vehicle_y = 138.0f;
 constexpr float k_pi = 3.14159265358979323846f;
 constexpr uint16 k_control_work_capacity = MT9V03X_H + 2;
 
@@ -680,7 +680,12 @@ void update_control_target(void)
 
     TrackScene scene = TrackScene::Straight;
     const float abs_legacy_deviation = std::fabs(legacy_deviation);
-    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle)
+    if (obstacle_avoid_active())
+    {
+        // 绕行期间先复用急弯速度/预瞄参数，避免引入新的速度场景枚举。
+        scene = TrackScene::SharpCurve;
+    }
+    else if (Image_Flag.Left_Circle || Image_Flag.Right_Circle)
     {
         scene = TrackScene::Circle;
     }
@@ -749,8 +754,5 @@ void update_control_target(void)
     Control_Ipm_Preview_Target[0] = preview_target[0];
     Control_Ipm_Preview_Target[1] = preview_target[1];
     vision_target_yaw = (scene == TrackScene::LostLine && !lost_line_ipm_fallback_valid) ? yaw : target_yaw;
-    if (g_debug_show_ipm_lines)
-    {
-        build_debug_image(g_debug_show_binary_image);
-    }
+    build_debug_image(g_debug_show_binary_image);
 }

@@ -53,6 +53,8 @@ void master_scheduler_callback()
     encoder_update_task(dt);
     imu_update_task(dt);
     Beep_Task_5ms();
+    // 绕行只需要一个 1s 倒计时，挂在 5ms 主节拍上比额外线程更确定。
+    obstacle_avoid_5ms_task();
 
     tick_5ms++; // 时间轴向前推移
 
@@ -142,25 +144,25 @@ void master_scheduler_callback()
 // ====================================================
 void tcp_background_thread()
 {
-    // nice(19) 将此线程优先级降到最低，绝不抢占控制算力
-    nice(19);
-    uint32_t send_interval_us = 30000; // 初始间隔 30ms（33fps）
+   nice(19);// nice(19) 将此线程优先级降到最低，绝不抢占控制算力
+    constexpr uint32_t k_min_send_interval_us = 16666; // 60fps
+    constexpr uint32_t k_max_send_interval_us = 500000;
+    uint32_t send_interval_us = k_min_send_interval_us;
     // 自适应退避的图传发送循环
     while (true)
     {
        // tcp_update_task(); // 执行网络收发与调参读取
-        // 图传发送 image_test() 刷新的原始灰度图，发送时加锁，避免读到半帧。
-        {
-            std::lock_guard<std::mutex> lock(g_image_mutex); // 加锁，防止读到写一半的图像
-            seekfree_assistant_camera_send();
-        }
+        tcp_camera_snapshot_debug_image();
+        seekfree_assistant_camera_send();
         if (tcp_camera_send_failed())           // 发送失败
         {
-            send_interval_us = std::min<uint32_t>(send_interval_us + 100000, 500000); // 间隔 +100ms，上限封顶 500ms，防止网络拥塞时疯狂重试
+            send_interval_us = std::min<uint32_t>(send_interval_us + 100000, k_max_send_interval_us); // 间隔 +100ms，上限封顶 500ms，防止网络拥塞时疯狂重试
         }
-        else if (send_interval_us > 100000)
+        else
         {
-            send_interval_us -= 20000;
+            send_interval_us = (send_interval_us > k_min_send_interval_us + 20000)
+                               ? (send_interval_us - 20000)
+                               : k_min_send_interval_us;
         }
         usleep(send_interval_us);
     }

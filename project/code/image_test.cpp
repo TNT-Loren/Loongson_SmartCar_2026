@@ -30,6 +30,15 @@ extern float test1, test2, test3;
 
 namespace
 {
+    enum class DebugViewMode : uint8_t
+    {
+        Composite,
+        Normal,
+        Ipm
+    };
+
+    DebugViewMode g_debug_view_mode = DebugViewMode::Composite;
+
     // constexpr 编译时常量 不可修改值 比define更安全
     constexpr uint8 k_max_lost_frame_count = 5; // 摄像头连续丢帧的最大允许次数
     constexpr uint8 k_default_left = 1;         // 默认左边界位置
@@ -43,6 +52,8 @@ namespace
     constexpr int k_circle_short_col_fallback_y = 20; // 状态三兜底点
 
     constexpr int k_circle_state2_no_monotonicity_timeout_frames = 20;//状态二到状态三的兜底次数
+    // 正常巡线时，从可靠边法向偏移半个 IPM 路宽得到赛道中线。
+    constexpr float k_ipm_default_midline_offset_px = 22.5f;
 
     enum class IpmReliableEdge : uint8_t
     {
@@ -179,6 +190,7 @@ uint8 Road_Wide[MT9V03X_H]; //赛道宽度
 uint8 bin_image_ipm[image_h][image_w];  //
 uint8 sobel_image[MT9V03X_H][MT9V03X_W];
 uint8_t White_Column[MT9V03X_H];//旧版白列缓存，当前有效列宽统计使用 White_col
+std::atomic<float> g_ipm_midline_offset_px{k_ipm_default_midline_offset_px};
 
 /* 旧版最长白列起点参考变量，当前起点改为按起始行最长白段寻找，暂时停用但不删除。
 int Longest_White_Column_Left[2]; //最长白列,[0]是最长白列的长度，[1]是第某列
@@ -193,6 +205,8 @@ int Both_Lost_Time = 0;//两边同时丢线数
 int point_mode =0; //0突变找点 1向量法找点
 TestMidlineMode g_test_midline_mode = TestMidlineMode::Auto;
 ReliableEdgeMode g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
+std::atomic<ObstacleAvoidDirection> g_obstacle_avoid_direction{ObstacleAvoidDirection::None};
+std::atomic<uint8_t> g_obstacle_avoid_ticks_left{0};
 uint8 My_Offine=0;
 
 uint16 points_l[(uint16)USE_num][2] = { {  0 } };//左线
@@ -311,14 +325,91 @@ void cycle_ipm_reliable_edge_mode(void)
     }
 }
 
+void trigger_obstacle_avoid(ObstacleAvoidDirection direction)
+{
+    if (direction == ObstacleAvoidDirection::None)
+    {
+        return;
+    }
+
+    // 当前试车方案：直接把选中的边线当临时中线使用，持续约 1s。
+    // 如果实车贴边太狠，只需要把 0.0f 改成一个小正数，例如 6~10px。
+    g_obstacle_avoid_direction.store(direction);
+    g_obstacle_avoid_ticks_left.store(400);
+    g_ipm_midline_offset_px.store(-5.0f);
+}
+
+void obstacle_avoid_5ms_task(void)
+{
+    uint8_t ticks_left = g_obstacle_avoid_ticks_left.load();
+    if (ticks_left == 0)
+    {
+        return;
+    }
+
+    ticks_left--;
+    g_obstacle_avoid_ticks_left.store(ticks_left);
+    if (ticks_left == 0)
+    {
+        // 到期后只恢复选择策略和偏移量，不直接改任何中线点集。
+        g_obstacle_avoid_direction.store(ObstacleAvoidDirection::None);
+        g_ipm_midline_offset_px.store(k_ipm_default_midline_offset_px);
+    }
+}
+
+bool obstacle_avoid_active(void)
+{
+    return g_obstacle_avoid_direction.load() != ObstacleAvoidDirection::None;
+}
+
+ObstacleAvoidDirection current_obstacle_avoid_direction(void)
+{
+    return g_obstacle_avoid_direction.load();
+}
+
+const char *obstacle_avoid_direction_name(ObstacleAvoidDirection direction)
+{
+    switch (direction)
+    {
+    case ObstacleAvoidDirection::Left:
+        return "L";
+    case ObstacleAvoidDirection::Right:
+        return "R";
+    default:
+        return "-";
+    }
+}
+
 void cycle_debug_view_mode(void)
 {
-    g_debug_show_ipm_lines = !g_debug_show_ipm_lines;
+    if (g_debug_view_mode == DebugViewMode::Composite)
+    {
+        g_debug_view_mode = DebugViewMode::Normal;
+    }
+    else if (g_debug_view_mode == DebugViewMode::Normal)
+    {
+        g_debug_view_mode = DebugViewMode::Ipm;
+    }
+    else
+    {
+        g_debug_view_mode = DebugViewMode::Composite;
+    }
+    g_debug_show_ipm_lines = (g_debug_view_mode == DebugViewMode::Ipm);
 }
 
 const char *debug_view_mode_name(void)
 {
-    return g_debug_show_ipm_lines ? "IPM_LINES" : "NORMAL";
+    switch (g_debug_view_mode)
+    {
+    case DebugViewMode::Composite:
+        return "COMBO";
+    case DebugViewMode::Normal:
+        return "NORMAL";
+    case DebugViewMode::Ipm:
+        return "IPM_LINES";
+    default:
+        return "UNKNOWN";
+    }
 }
 
 const char *ipm_midline_scene_name(IpmMidlineScene scene)
@@ -605,6 +696,17 @@ ReliableEdgeMode selected_ipm_reliable_edge_mode(void)
 
 ReliableEdgeMode effective_ipm_reliable_edge_mode(void)
 {
+    // 绕行优先级最高：触发后先压过圆环/自动可靠边逻辑。
+    const ObstacleAvoidDirection avoid_direction = current_obstacle_avoid_direction();
+    if (avoid_direction == ObstacleAvoidDirection::Left)
+    {
+        return ReliableEdgeMode::ForceLeft;
+    }
+    if (avoid_direction == ObstacleAvoidDirection::Right)
+    {
+        return ReliableEdgeMode::ForceRight;
+    }
+
     if (Image_Flag.Left_Circle)
     {
         if (island_state == 1||island_state == 2)
@@ -655,10 +757,26 @@ namespace
     //mat2
     constexpr double k_image_to_ipm_mat[3][3] =
         {
-            {4.0251572327044, 8.36477987421383, -230.062893081761},
-            {1.97716239515854E-15, 15.8301886792453, -275.584905660377},
-            {1.36019776853447E-17, 0.10377358490566, 1},
+            {3.88086826550718, 6.83393912629936, -221.200998709152},
+            {0.0710985800665834, 13.1611692370406, -252.156090767037},
+            {0.00156260615530949, 0.0848223384740814, 1},
     };
+    // double Mat2[3][3] = {
+    //     {3.88086826550718, 6.83393912629936, -221.200998709152},
+    //     {0.0710985800665834, 13.1611692370406, -252.156090767037},
+    //     {0.00156260615530949, 0.0848223384740814, 1},
+    // };
+    // double Mat1[3][3] = {
+    //     {0.185851948051948, -0.143535930735931, 8.09657748917749},
+    //     {-0.00541645021645022, 0.0234712842712843, 6.62792958152959},
+    //     {-0.000169264069264069, -0.00180548340548341, 0.303603318903319},
+    // };
+
+    // double Mat2[3][3] = {
+    //     {5.32608695652173, 8.07864450127876, -318.401534526854},
+    //     {0.145780051150895, 16.1227621483376, -355.86189258312},
+    //     {0.00383631713554987, 0.100383631713555, 1},
+    // };
 
     // {1.54922851132135, 4.87986157380177, -49.7605197103311},
     // {-0.244732053958449, 8.58083223015027, -50.5084935687455},
@@ -673,7 +791,6 @@ namespace
     constexpr float k_ipm_sample_distance = 3.9f; 
     constexpr float k_ipm_break_distance = 18.0f;// 断线距离，超过这个距离认为两点不连续
     constexpr int k_ipm_midline_tangent_span = 2;// 计算中线切线的跨度，单位是点数
-    constexpr float k_ipm_half_road_width = 19.5f; // 当前按 Mat2 和标准宽度估算，后续按实测调整//30-》39   
 
     /*
     double Mat1[3][3]=       { { 0.594503055500757, -0.403675880267065, 9.19372040877073},
@@ -844,7 +961,8 @@ namespace
 
     void build_ipm_offset_midline(const uint16 edge_points[MT9V03X_H][2],
                                   uint16 edge_count,
-                                  bool from_left_edge)
+                                  bool from_left_edge,
+                                  float offset_px)
     {
         Ipm_Mid_Point_Count = 0;
         if (edge_count <= k_ipm_midline_tangent_span * 2)
@@ -876,8 +994,8 @@ namespace
             const float ty = dy / len;
             const float nx = -ty;
             const float ny = tx;
-            const float mid_x = static_cast<float>(edge_points[i][0]) + direction * nx * k_ipm_half_road_width;
-            const float mid_y = static_cast<float>(edge_points[i][1]) + direction * ny * k_ipm_half_road_width;
+            const float mid_x = static_cast<float>(edge_points[i][0]) + direction * nx * offset_px;
+            const float mid_y = static_cast<float>(edge_points[i][1]) + direction * ny * offset_px;
             Ipm_Mid_Points[Ipm_Mid_Point_Count][0] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(mid_x)), 0, MT9V03X_W - 1));
             Ipm_Mid_Points[Ipm_Mid_Point_Count][1] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(mid_y)), 0, MT9V03X_H - 1));
             Ipm_Mid_Point_Count++;
@@ -932,14 +1050,16 @@ void build_ipm_midline(ReliableEdgeMode mode)
     {
         reliable_edge_mode = selected_ipm_reliable_edge_mode();
     }
+    // offset_px 是“可靠边 -> 临时中线”的法向偏移。绕行时可被运行时改成 0。
+    const float offset_px = g_ipm_midline_offset_px.load();
 
     if (reliable_edge_mode == ReliableEdgeMode::ForceLeft)
     {
-        build_ipm_offset_midline(Ipm_Left_Points, Ipm_Left_Point_Count, true);
+        build_ipm_offset_midline(Ipm_Left_Points, Ipm_Left_Point_Count, true, offset_px);
     }
     else
     {
-        build_ipm_offset_midline(Ipm_Right_Points, Ipm_Right_Point_Count, false);
+        build_ipm_offset_midline(Ipm_Right_Points, Ipm_Right_Point_Count, false, offset_px);
     }
 }
 
@@ -3712,11 +3832,12 @@ void Island_Detect(void)//环岛检测
         }
         else if(island_state == 5)
         {
-            if(car.circle_intergrate_yaw <= -360)
-            {
-                island_state = 6;
-            }
-            else if(R_D_corner_flag == 1)
+            // if(car.circle_intergrate_yaw <= -360)
+            // {
+            //     island_state = 6;
+            // }
+           // else if(R_D_corner_flag == 1)
+            if (R_D_corner_flag == 1)
             {
                 Right_Add_Line(R_D_corner_col,R_D_corner_row,0,0);
             }
@@ -3898,11 +4019,12 @@ void Island_Detect(void)//环岛检测
         }
         else if(island_state == 5)
         {
-            if(car.circle_intergrate_yaw >= 360)
-            {
-                island_state = 6;
-            }
-            else if(L_D_corner_flag == 1)
+            // if(car.circle_intergrate_yaw >= 360)
+            // {
+            //     island_state = 6;
+            // }
+          //  else if(L_D_corner_flag == 1)
+           if (L_D_corner_flag == 1)
             {
                 Left_Add_Line(L_D_corner_col,L_D_corner_row,MT9V03X_W,0);
             }
@@ -4285,9 +4407,314 @@ void Image_Process(void)
 
 namespace
 {
+constexpr int k_composite_view_w = 80;
+constexpr int k_composite_view_h = 60;
+
 uint16 debug_color(uint16 color)
 {
     return static_cast<uint16>((color << 8) | (color >> 8));
+}
+
+const char *debug_track_scene_short_name(TrackScene scene)
+{
+    switch (scene)
+    {
+    case TrackScene::Straight:
+        return "ST";
+    case TrackScene::GentleCurve:
+        return "GC";
+    case TrackScene::SharpCurve:
+        return "SH";
+    case TrackScene::Circle:
+        return "CIR";
+    case TrackScene::LostLine:
+        return "LOS";
+    default:
+        return "UNK";
+    }
+}
+
+ReliableEdgeMode debug_effective_selected_edge(void)
+{
+    ReliableEdgeMode reliable_edge_mode = effective_ipm_reliable_edge_mode();
+    if (reliable_edge_mode == ReliableEdgeMode::Auto)
+    {
+        reliable_edge_mode = selected_ipm_reliable_edge_mode();
+    }
+    return reliable_edge_mode;
+}
+
+void draw_debug_scaled_point(uint16 (*img)[image_width],
+                             int dst_x,
+                             int dst_y,
+                             int dst_w,
+                             int dst_h,
+                             int src_x,
+                             int src_y,
+                             uint16 color)
+{
+    const int x = dst_x + src_x * dst_w / image_width;
+    const int y = dst_y + src_y * dst_h / image_height;
+    dbg_point(img, x, y, color);
+}
+
+void draw_debug_scaled_line(uint16 (*img)[image_width],
+                            int dst_x,
+                            int dst_y,
+                            int dst_w,
+                            int dst_h,
+                            int src_x1,
+                            int src_y1,
+                            int src_x2,
+                            int src_y2,
+                            uint16 color)
+{
+    const int x1 = dst_x + src_x1 * dst_w / image_width;
+    const int y1 = dst_y + src_y1 * dst_h / image_height;
+    const int x2 = dst_x + src_x2 * dst_w / image_width;
+    const int y2 = dst_y + src_y2 * dst_h / image_height;
+    dbg_line(img, x1, y1, x2, y2, color);
+}
+
+void draw_scaled_source_image(uint16 (*img)[image_width],
+                              const uint8 (*src)[image_width],
+                              int dst_x,
+                              int dst_y,
+                              int dst_w,
+                              int dst_h)
+{
+    for (int y = 0; y < dst_h; ++y)
+    {
+        const int src_y = y * image_height / dst_h;
+        for (int x = 0; x < dst_w; ++x)
+        {
+            const int src_x = x * image_width / dst_w;
+            const uint8 g = src[src_y][src_x];
+            const uint16 r = (g >> 3) & 0x1F;
+            const uint16 gr = (g >> 2) & 0x3F;
+            const uint16 b = (g >> 3) & 0x1F;
+            const uint16 color = static_cast<uint16>((r << 11) | (gr << 5) | b);
+            img[dst_y + y][dst_x + x] = debug_color(color);
+        }
+    }
+}
+
+void draw_debug_panel_border(uint16 (*img)[image_width],
+                             int x,
+                             int y,
+                             int w,
+                             int h,
+                             uint16 color)
+{
+    dbg_line(img, x, y, x + w - 1, y, color);
+    dbg_line(img, x, y + h - 1, x + w - 1, y + h - 1, color);
+    dbg_line(img, x, y, x, y + h - 1, color);
+    dbg_line(img, x + w - 1, y, x + w - 1, y + h - 1, color);
+}
+
+void draw_composite_normal_view(uint16 (*img)[image_width],
+                                int dst_x,
+                                int dst_y,
+                                int dst_w,
+                                int dst_h,
+                                bool show_binary)
+{
+    draw_scaled_source_image(img, show_binary ? bin_image : image_copy, dst_x, dst_y, dst_w, dst_h);
+
+    const uint16 left_color = debug_color(RGB565_RED);
+    const uint16 right_color = debug_color(RGB565_BLUE);
+    const uint16 mid_color = debug_color(RGB565_GREEN);
+    const uint16 border_color = debug_color(RGB565_GRAY);
+
+    draw_debug_panel_border(img, dst_x, dst_y, dst_w, dst_h, border_color);
+
+    for (int row = 0; row < image_height; row += 2)
+    {
+        draw_debug_scaled_point(img, dst_x, dst_y, dst_w, dst_h, left_edge_line[row], row, left_color);
+        draw_debug_scaled_point(img, dst_x, dst_y, dst_w, dst_h, right_edge_line[row], row, right_color);
+        draw_debug_scaled_point(img, dst_x, dst_y, dst_w, dst_h, mid_line[row], row, mid_color);
+    }
+}
+
+void draw_composite_ipm_view(uint16 (*img)[image_width],
+                             int dst_x,
+                             int dst_y,
+                             int dst_w,
+                             int dst_h)
+{
+    const uint16 bg_color = debug_color(RGB565_WHITE);
+    const uint16 edge_color = debug_color(RGB565_BLACK);
+    const uint16 mid_color = debug_color(RGB565_RED);
+    const uint16 control_mid_color = debug_color(RGB565_BLUE);
+    const uint16 preview_color = debug_color(RGB565_RED);
+    const uint16 border_color = debug_color(RGB565_GRAY);
+
+    dbg_fill_rect(img, dst_x, dst_y, dst_x + dst_w - 1, dst_y + dst_h - 1, bg_color);
+    draw_debug_panel_border(img, dst_x, dst_y, dst_w, dst_h, border_color);
+
+    auto draw_point_line = [&](const uint16 points[MT9V03X_H][2], uint16 count, uint16 color) {
+        for (uint16 i = 1; i < count; ++i)
+        {
+            if (is_ipm_continuous(points[i - 1][0], points[i - 1][1],
+                                  points[i][0], points[i][1]))
+            {
+                draw_debug_scaled_line(img,
+                                       dst_x,
+                                       dst_y,
+                                       dst_w,
+                                       dst_h,
+                                       points[i - 1][0],
+                                       points[i - 1][1],
+                                       points[i][0],
+                                       points[i][1],
+                                       color);
+            }
+        }
+    };
+
+    draw_point_line(Ipm_Left_Points, Ipm_Left_Point_Count, edge_color);
+    draw_point_line(Ipm_Right_Points, Ipm_Right_Point_Count, edge_color);
+
+    if (Control_Ipm_Debug_Scene == TrackScene::LostLine)
+    {
+        draw_point_line(Ipm_Bilateral_Mid_Points, Ipm_Bilateral_Mid_Point_Count, mid_color);
+    }
+    else
+    {
+        draw_point_line(Ipm_Mid_Points, Ipm_Mid_Point_Count, mid_color);
+    }
+    draw_point_line(Control_Ipm_Extended_Mid_Points, Control_Ipm_Extended_Mid_Point_Count, control_mid_color);
+
+    if (Control_Ipm_Preview_Target_Valid)
+    {
+        const int x = dst_x + Control_Ipm_Preview_Target[0] * dst_w / image_width;
+        const int y = dst_y + Control_Ipm_Preview_Target[1] * dst_h / image_height;
+        dbg_circle(img, x, y, 3, preview_color);
+    }
+}
+
+void draw_lost_bar(uint16 (*img)[image_width],
+                   int x,
+                   int y,
+                   const char *label,
+                   int value,
+                   uint16 color,
+                   uint16 text_color,
+                   uint16 bg_color)
+{
+    constexpr int k_bar_w = 28;
+    constexpr int k_bar_h = 3;
+    constexpr int k_label_w = 8;
+    const int filled = std::clamp(value * k_bar_w / MT9V03X_H, 0, k_bar_w);
+
+    dbg_text_3x5(img, x, y, label, text_color, bg_color, true);
+    dbg_fill_rect(img, x + k_label_w, y + 1, x + k_label_w + k_bar_w - 1, y + k_bar_h, debug_color(RGB565_GRAY));
+    if (filled > 0)
+    {
+        dbg_fill_rect(img, x + k_label_w, y + 1, x + k_label_w + filled - 1, y + k_bar_h, color);
+    }
+}
+
+void draw_circle_state_blocks(uint16 (*img)[image_width],
+                              int x,
+                              int y,
+                              uint16 color,
+                              uint16 empty_color)
+{
+    const int state_count = std::clamp<int>(island_state, 0, 6);
+    for (int block = 0; block < 6; ++block)
+    {
+        const int x0 = x + block * 5;
+        const uint16 block_color = block < state_count ? color : empty_color;
+        dbg_fill_rect(img, x0, y, x0 + 3, y + 4, block_color);
+    }
+}
+
+void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w, int h)
+{
+    const uint16 bg_color = debug_color(RGB565_BLACK);
+    const uint16 text_color = debug_color(RGB565_CYAN);
+    const uint16 lost_color = debug_color(RGB565_RED);
+    const uint16 left_color = debug_color(RGB565_RED);
+    const uint16 right_color = debug_color(RGB565_BLUE);
+    const uint16 both_color = debug_color(RGB565_YELLOW);
+    const uint16 state_color = debug_color(RGB565_PURPLE);
+    const uint16 empty_color = debug_color(RGB565_GRAY);
+
+    dbg_fill_rect(img, x, y, x + w - 1, y + h - 1, bg_color);
+
+    char scene_text[16] = {0};
+    std::snprintf(scene_text, sizeof(scene_text), "SCN:%s", debug_track_scene_short_name(Control_Ipm_Debug_Scene));
+    dbg_text_3x5(img, x + 2, y + 2, scene_text, text_color, bg_color, true);
+
+    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)
+    {
+        char circle_text[12] = {0};
+        const char circle_dir = Image_Flag.Left_Circle ? 'L' : (Image_Flag.Right_Circle ? 'R' : '-');
+        std::snprintf(circle_text, sizeof(circle_text), "C%c", circle_dir);
+        dbg_text_3x5(img, x + 2, y + 9, circle_text, state_color, bg_color, true);
+        draw_circle_state_blocks(img, x + 14, y + 9, state_color, empty_color);
+    }
+
+    draw_lost_bar(img, x + 2, y + 20, "L", Left_Lost_Time, left_color, text_color, bg_color);
+    draw_lost_bar(img, x + 2, y + 27, "R", Right_Lost_Time, right_color, text_color, bg_color);
+    draw_lost_bar(img, x + 2, y + 34, "B", Both_Lost_Time, both_color, text_color, bg_color);
+    if (is_lost_line())
+    {
+        dbg_text_3x5(img, x + 2, y + 43, "FLOS", lost_color, bg_color, true);
+    }
+}
+
+void draw_composite_reliable_edge_panel(uint16 (*img)[image_width], int x, int y, int w, int h)
+{
+    const uint16 bg_color = debug_color(RGB565_BLACK);
+    const uint16 text_color = debug_color(RGB565_YELLOW);
+    const uint16 avoid_color = debug_color(RGB565_RED);
+
+    dbg_fill_rect(img, x, y, x + w - 1, y + h - 1, bg_color);
+
+    const char *edge_text = "REL:R";
+    if (Control_Ipm_Debug_Scene == TrackScene::LostLine)
+    {
+        edge_text = "REL:BOTH";
+    }
+    else if (debug_effective_selected_edge() == ReliableEdgeMode::ForceLeft)
+    {
+        edge_text = "REL:L";
+    }
+
+    dbg_text_3x5(img, x + 2, y + 2, edge_text, text_color, bg_color, true);
+
+    char offset_text[16] = {0};
+    std::snprintf(offset_text, sizeof(offset_text), "OFF:%4.1f", g_ipm_midline_offset_px.load());
+    dbg_text_3x5(img, x + 2, y + 11, offset_text, text_color, bg_color, true);
+
+    if (obstacle_avoid_active())
+    {
+        char avoid_text[12] = {0};
+        std::snprintf(avoid_text,
+                      sizeof(avoid_text),
+                      "AVD:%s",
+                      obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
+        dbg_text_3x5(img, x + 2, y + 20, avoid_text, avoid_color, bg_color, true);
+    }
+}
+
+void build_composite_debug_image(uint16 (*img)[image_width], bool show_binary)
+{
+    const uint16 bg_color = debug_color(RGB565_BLACK);
+    for (int row = 0; row < image_height; ++row)
+    {
+        for (int col = 0; col < image_width; ++col)
+        {
+            img[row][col] = bg_color;
+        }
+    }
+
+    draw_composite_normal_view(img, 0, 0, k_composite_view_w, k_composite_view_h, show_binary);
+    draw_composite_status_panel(img, 80, 0, 80, 60);
+    draw_composite_reliable_edge_panel(img, 0, 60, 80, 60);
+    draw_composite_ipm_view(img, 80, 60, k_composite_view_w, k_composite_view_h);
 }
 
 void draw_debug_status_bar(uint16 (*img)[image_width])
@@ -4557,6 +4984,19 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
                   static_cast<int>(Control_Ipm_Raw_Last_Valid_Y));
     dbg_text_6x8(img, 2, 10, debug_text, extended_mid_color, bg_color, false);
 
+    char offset_text[24] = {0};
+    std::snprintf(offset_text, sizeof(offset_text), "OFF:%4.1f", g_ipm_midline_offset_px.load());
+    dbg_text_6x8(img, 2, 20, offset_text, debug_color(RGB565_PURPLE), bg_color, false);
+    if (obstacle_avoid_active())
+    {
+        char avoid_text[16] = {0};
+        std::snprintf(avoid_text,
+                      sizeof(avoid_text),
+                      "AVD:%s",
+                      obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
+        dbg_text_6x8(img, 2, 30, avoid_text, debug_color(RGB565_RED), bg_color, false);
+    }
+
     char error_text[24] = {0};
     std::snprintf(error_text, sizeof(error_text), "ERR:%+.1f", Line_Error);
     dbg_text_6x8(img, image_width - 8 * 6 - 2, 0,
@@ -4569,7 +5009,13 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
 // 构建 SCC8660 彩色调试图。只写 debug_image，不回写算法使用的灰度图/二值图。
 void build_debug_image(bool show_binary)
 {
-    if (g_debug_show_ipm_lines)
+    if (g_debug_view_mode == DebugViewMode::Composite)
+    {
+        build_composite_debug_image(debug_image, show_binary);
+        return;
+    }
+
+    if (g_debug_view_mode == DebugViewMode::Ipm)
     {
         build_ipm_lines_debug_image(debug_image);
         return;
@@ -4615,10 +5061,8 @@ void reset_track_lines(void)
         Right_Line[row] = k_default_right;
         Mid_Line[row] = k_default_mid;
         End_Mid_Line[row] = k_default_mid;
-        Test_Mid_Line[row] = k_default_mid;
-        //Road_Wide[row] = Standard_Road_Wide[row];//暂时用不上
+        Test_Mid_Line[row] = k_default_mid;      
     }
-    //update_track_lines();
 }
 
 }
@@ -4682,7 +5126,6 @@ bool image_test(void)
         Image_Process();
         update_track_lines();
         refresh_control_ipm_debug_midline();
-        build_debug_image(g_debug_show_binary_image);
     }
     return true;
 }

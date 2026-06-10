@@ -65,8 +65,8 @@ const char *track_scene_name(TrackScene scene)
 
 int main(int, char **)
 {
-    // esc_init();
-    //esc_set_speed_percent(0);
+    //  esc_init();
+    //  esc_set_speed_percent(0);
      imu_init();
      Encoder_Init();
      Beep_Init();
@@ -158,7 +158,7 @@ int main(int, char **)
     }
 }
 
-void print_ipm_mid_points_snapshot()
+void print_ipm_mid_points_snapshot()// 供调试用的函数：打印一帧 IPM 中线点集的快照到控制台
 {
     uint16 mid_points[MT9V03X_H][2] = {};
     uint16 mid_count = 0;
@@ -308,6 +308,24 @@ void keyboard_poll_simple()
         case 's':
         case 'S':
             print_ipm_mid_points_snapshot();
+            break;
+
+        case 'q':
+        case 'Q':
+            // 手动模拟“左绕行”：用左边线作为 1s 临时中线参考。
+            trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
+            std::cout << "obstacle avoid -> L, offset="
+                      << g_ipm_midline_offset_px.load()
+                      << std::endl;
+            break;
+
+        case 'e':
+        case 'E':
+            // 手动模拟“右绕行”：用右边线作为 1s 临时中线参考。
+            trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
+            std::cout << "obstacle avoid -> R, offset="
+                      << g_ipm_midline_offset_px.load()
+                      << std::endl;
             break;
 
         default:
