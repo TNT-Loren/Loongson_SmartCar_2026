@@ -4,8 +4,7 @@
 
 TrackInfo g_track_info;
 
-namespace
-{
+
     // 基础目标车速配置
     // constexpr float k_speed_straight = 130.0f;
     // constexpr float k_speed_curve = 125.0f;
@@ -18,11 +17,11 @@ namespace
     // constexpr float k_speed_sharp = 105.0f;
     // constexpr float k_speed_lost = 90.0f;
 
-    constexpr float k_speed_straight = 130.0f;//aaa
-    constexpr float k_speed_curve = 100.0f;
-    constexpr float k_speed_sharp = 90.0f;
-    constexpr float k_speed_circle = 95.0f;
-    constexpr float k_speed_lost = 95.0f;
+     float k_speed_straight = 130.0f;//aaa
+     float k_speed_curve = 100.0f;
+     float k_speed_sharp = 90.0f;
+     float k_speed_circle = 95.0f;
+     float k_speed_lost = 95.0f;
 
     // constexpr float k_speed_straight = 50.0f;
     // constexpr float k_speed_curve = 40.0f;
@@ -31,15 +30,15 @@ namespace
     // constexpr float k_speed_lost = 30.0f;
 
     // 加减速步长限制（非对称平滑）
-    constexpr float k_speed_up_step = 8.0f;
-    constexpr float k_speed_down_step = 10.0f;
+     float k_speed_up_step = 8.0f;
+     float k_speed_down_step = 10.0f;
     // deviation 现在是 pure pursuit 的 alpha 角度，不是历史归一化横偏。
-    constexpr float k_large_alpha_slowdown_deg = 25.0f;// 角度误差过大时的强制降速幅度（不考虑场景，仅按角度误差单因素调整速度）
-}
+     float k_large_alpha_slowdown_deg = 25.0f;// 角度误差过大时的强制降速幅度（不考虑场景，仅按角度误差单因素调整速度）
 
+
+float base_start_speed = 120.0f;
 float calc_base_speed(const TrackInfo &info)
 {
-    static float base_speed = 120.0f; // 初始起步速度
 
     float target = k_speed_straight;
 
@@ -77,9 +76,9 @@ float calc_base_speed(const TrackInfo &info)
     //     target -= 8.0f;
 
     // 3. 动态平滑限幅（入弯急刹，出弯缓加）
-    float delta = target - base_speed;
+    float delta = target - base_start_speed;
     delta = std::clamp(delta, -k_speed_down_step, k_speed_up_step);
-    base_speed += delta;
+    base_start_speed += delta;
 
-    return base_speed;
+    return base_start_speed;
 }

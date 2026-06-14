@@ -2,7 +2,9 @@
 #include "main.hpp"
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
-#include "beep.hpp"
+
+// 提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
+#include "../code/vs_inference.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -26,6 +28,11 @@ void keyboard_poll_simple();
 //int test=80;
 float test1, test2, test3, test4;
 int key_mode = 0;
+
+VSInference g_vs;                     // AI推理对象（image_copy[]供图传使用）
+zf_driver_tcp_client g_vs_tcp_client; // VS专用TCP客户端（后台线程中init和发送）
+bool g_vs_ready = false;              // VS是否初始化成功（单摄像头时可能失败，降级跳过）
+
 //===================================================
 void cleanup();
 void sigint_handler(int signum);
@@ -86,6 +93,53 @@ int main(int, char **)
         std::cout << "  1 " << std::endl;
         return -1; // 摄像头初始化失败，直接退出程序
     }
+    // ===== VS添加：VSInference配置与初始化（共享巡线的uvc_dev，不重复open摄像头）=====
+    // ---- 色块检测参数介绍 ----
+    // int box_size      = 64;      // 绿框大小（像素），须与模型输入尺寸一致
+    // int area_min      = 30;      // 色块最小面积（过滤噪点，单位 px²）
+    // int area_max      = 600;     // 色块最大面积（下半区/有效区使用）
+    // int zone_end_y    = 120;     // 两段分区边界 Y 坐标
+    // int zone_area_max = 300;     // 上半区面积上限（比下半区更严格，抑制顶端干扰）
+
+    // // ---- 有效区域（绿框底部中心坐标范围，在此范围内才参与检测和跟踪） ----
+    // int cx_min = 80;             // 底部中心 X 下限
+    // int cx_max = 240;            // 底部中心 X 上限
+    // int by_min = 100;            // 底部中心 Y 下限（也是权重 LUT 归一化基准）
+    // int by_max = 180;            // 底部中心 Y 上限
+    g_vs.set_external_camera(&uvc_dev);
+    // 色块检测
+    g_vs.cfg.box_size = 64;
+    g_vs.cfg.area_min = 15;
+    g_vs.cfg.area_max = 400;
+    g_vs.cfg.zone_end_y = 50;
+    g_vs.cfg.zone_area_max = 300;
+
+    // HSV 降采样（1=原始320×240, 2=160×120(算力1/4), 4=80×60(算力1/16)）
+    g_vs.cfg.hsv_scale = 4;
+
+    // 有效区域
+    g_vs.cfg.cx_min = 60;
+    g_vs.cfg.cx_max = 240;
+    g_vs.cfg.by_min = 70;
+    g_vs.cfg.by_max = 100;
+
+    // 跟踪
+    g_vs.cfg.lost_frames = 5;
+    g_vs.cfg.min_track = 3;
+    g_vs.cfg.exp_alpha = 2.5f;
+
+    std::vector<std::string> labels = {
+        "爆炸物", "急救包", "救护车", "枪械", "望远镜", "装甲车"};
+    float mean_vals[3] = {123.675f, 116.28f, 103.53f};
+    float norm_vals[3] = {0.01712475f, 0.017507f, 0.01742919f};
+
+    g_vs_ready = g_vs.init(labels, mean_vals, norm_vals);
+    if (!g_vs_ready)
+    {
+        printf("vs init failed, AI/图传降级跳过\r\n");
+    }
+    // ===== VS添加结束 =====
+
     atexit(cleanup);
     signal(SIGINT, sigint_handler);
     keyboard_init_simple();// 初始化简单键盘输入，供调试用
@@ -126,7 +180,51 @@ int main(int, char **)
             publish_lost_line_result();
         }
         fps_timer_end();
-        // motor_set_speed(30, 30);
+        // ===== VS添加：AI视觉推理 — 复用巡线已抓帧，彩色给AI，不额外等帧 =====
+        if (g_vs_ready)
+        {
+            cv::Mat color_frame = uvc_dev.get_frame_mjpg();
+            if (!g_vs.tick_bgr(color_frame))
+            {
+                printf("vs.tick error\r\n");
+            }
+            if (g_vs.has_new_result())
+            {
+                auto t_result = std::chrono::steady_clock::now();
+                std::string result = g_vs.get_result();
+                printf("Final Result: %s\r\n", result.c_str());
+                // AI结果映射绕行：武器→左绕  物资→右绕  载具→直行压过
+                if (result == "武器")
+                {
+                    trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
+                }
+                else if (result == "物资")
+                {
+                    trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
+                }
+                auto t_trig = std::chrono::steady_clock::now();
+                auto trig_us = std::chrono::duration_cast<std::chrono::microseconds>(t_trig - t_result).count();
+                printf("[TIMING] 结果→绕行触发: %lld us | 物体离开等待: %lld ms\r\n",
+                       (long long)trig_us, (long long)g_vs.get_lost_ms());
+                // 载具/交通工具 → 直行，不触发绕行
+                g_vs.clear_result();
+            }
+            // 实时帧率统计（每秒输出一次）
+            {
+                static int vs_fps_cnt = 0;
+                static auto vs_fps_last = std::chrono::steady_clock::now();
+                vs_fps_cnt++;
+                auto now = std::chrono::steady_clock::now();
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - vs_fps_last).count();
+                if (ms >= 1000)
+                {
+                    printf("VS FPS: %d\r\n", vs_fps_cnt);
+                    vs_fps_cnt = 0;
+                    vs_fps_last = now;
+                }
+            }
+        }
+        // ===== VS添加结束 =====
         if (need_print.load() == 1)
         {
             // TrackInfo track_info;

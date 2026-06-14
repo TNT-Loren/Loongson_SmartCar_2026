@@ -24,6 +24,13 @@ struct TrackInfo
 };
 
 extern TrackInfo g_track_info;
+extern float base_start_speed;
+
+extern float k_speed_straight; // aaa
+extern float k_speed_curve;
+extern float k_speed_sharp;
+extern float k_speed_circle;
+extern float k_speed_lost;
 
 // 基础速度计算接口
 float calc_base_speed(const TrackInfo &info);

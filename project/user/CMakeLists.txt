@@ -99,6 +99,7 @@ target_link_libraries(
 ${PROJ_NAME} 
 ${OpenCV_LIBS}
 tflm          # 链接TFLM静态库（必须）
+ncnn          # 链接NCNN静态库（VS-AI推理依赖）
 pthread       # 线程库（TFLM内部使用）
 m             # 数学库（算子计算依赖）
 )
