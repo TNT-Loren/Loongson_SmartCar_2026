@@ -324,7 +324,7 @@ void cycle_ipm_reliable_edge_mode(void)
         g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
     }
 }
-
+// 触发绕行：设置绕行方向和持续时间，实际中线调整在 update_track_lines() 中根据这个状态进行。
 void trigger_obstacle_avoid(ObstacleAvoidDirection direction)
 {
     if (direction == ObstacleAvoidDirection::None)
@@ -4425,6 +4425,8 @@ const char *debug_track_scene_short_name(TrackScene scene)
         return "GC";
     case TrackScene::SharpCurve:
         return "SH";
+    case TrackScene::ObstacleAvoid:
+        return "OBS";
     case TrackScene::Circle:
         return "CIR";
     case TrackScene::LostLine:
@@ -4884,6 +4886,8 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
             return "SCN:Gentle";
         case TrackScene::SharpCurve:
             return "SCN:Sharp";
+        case TrackScene::ObstacleAvoid:
+            return "SCN:Obstacle";
         case TrackScene::Circle:
             return "SCN:Circle";
         case TrackScene::LostLine:
@@ -5042,6 +5046,7 @@ void build_debug_image(bool show_binary)
         case TrackScene::Straight:   scene_str = "Straight"; break;
         case TrackScene::GentleCurve: scene_str = "Gentle";   break;
         case TrackScene::SharpCurve:  scene_str = "Sharp";    break;
+        case TrackScene::ObstacleAvoid: scene_str = "Obstacle"; break;
         case TrackScene::Circle:      scene_str = "Circle";   break;
         case TrackScene::LostLine:    scene_str = "LOST";     break;
         default: break;

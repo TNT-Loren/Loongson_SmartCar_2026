@@ -72,6 +72,10 @@ LegacyPreviewYawParam get_legacy_preview_yaw_param(TrackScene scene)
     {
         return {27.0f, 17.0f, 35.0f};
     }
+    if (scene == TrackScene::ObstacleAvoid)
+    {
+        return {27.0f, 17.0f, 35.0f};
+    }
     if (scene == TrackScene::GentleCurve)
     {
         return {21.0f, 15.0f, 28.0f};
@@ -85,6 +89,11 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
     if (scene == TrackScene::LostLine)
     {
         return {47.0f, 35.0f};
+    }
+    if (scene == TrackScene::ObstacleAvoid)
+    {
+        // Obstacle avoidance can be tuned without affecting normal sharp curves.
+        return {20.0f, 70.0f};
     }
     if (scene == TrackScene::Circle)
     {
@@ -682,8 +691,8 @@ void update_control_target(void)
     const float abs_legacy_deviation = std::fabs(legacy_deviation);
     if (obstacle_avoid_active())
     {
-        // 绕行期间先复用急弯速度/预瞄参数，避免引入新的速度场景枚举。
-        scene = TrackScene::SharpCurve;
+        // Obstacle avoidance has its own speed and preview tuning.
+        scene = TrackScene::ObstacleAvoid;
     }
     else if (Image_Flag.Left_Circle || Image_Flag.Right_Circle)
     {

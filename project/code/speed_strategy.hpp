@@ -12,6 +12,7 @@ enum class TrackScene : uint8_t
     Straight,
     GentleCurve,
     SharpCurve,
+    ObstacleAvoid,
     Circle,
     LostLine
 };
@@ -29,6 +30,7 @@ extern float base_start_speed;
 extern float k_speed_straight; // aaa
 extern float k_speed_curve;
 extern float k_speed_sharp;
+extern float k_speed_obstacle_avoid;
 extern float k_speed_circle;
 extern float k_speed_lost;
 

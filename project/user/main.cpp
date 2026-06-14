@@ -61,6 +61,8 @@ const char *track_scene_name(TrackScene scene)
         return "GentleCurve";
     case TrackScene::SharpCurve:
         return "SharpCurve";
+    case TrackScene::ObstacleAvoid:
+        return "ObstacleAvoid";
     case TrackScene::Circle:
         return "Circle";
     case TrackScene::LostLine:

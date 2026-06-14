@@ -20,6 +20,7 @@ TrackInfo g_track_info;
      float k_speed_straight = 130.0f;//aaa
      float k_speed_curve = 100.0f;
      float k_speed_sharp = 90.0f;
+     float k_speed_obstacle_avoid = 40.0f;//绕行
      float k_speed_circle = 95.0f;
      float k_speed_lost = 95.0f;
 
@@ -53,6 +54,10 @@ float calc_base_speed(const TrackInfo &info)
     {
        target = k_speed_sharp;
         // test3 = 1;
+    }
+    else if (info.scene == TrackScene::ObstacleAvoid)
+    {
+        target = k_speed_obstacle_avoid;
     }
     else if (info.scene == TrackScene::Circle)
     {
