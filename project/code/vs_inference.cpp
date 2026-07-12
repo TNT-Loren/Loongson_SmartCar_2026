@@ -4,6 +4,8 @@
 #include <cmath>
 #include <iostream>
 
+VSInference g_vs;
+
 // ===================================================================
 // 内部类型别名（隐藏逐飞 SDK 具体类型）
 // ===================================================================
@@ -11,10 +13,43 @@ using UVCDev = zf_device_uvc;
 class LQ_NCNN;
 
 // ===================================================================
-// 辅助函数：画水平线
+// 辅助函数：Bresenham 直线（cv::Mat 版本）
+// VS添加：移植自 zgc_draw_tool.cpp 的 dbg_line，适配 cv::Mat BGR 图像
+//   纯整数 Bresenham 算法，无浮点、无除法，与 dbg_line 逻辑一致
 // ===================================================================
+static inline void bres_line(cv::Mat& img, int x1, int y1, int x2, int y2, const cv::Scalar& color) {
+    // VS添加：Bresenham 算法核心，与 zgc_draw_tool.cpp dbg_line 保持一致
+    int dx  = abs(x2 - x1);
+    int sx  = (x1 < x2) ? 1 : -1;
+    int dy  = -abs(y2 - y1);
+    int sy  = (y1 < y2) ? 1 : -1;
+    int err = dx + dy;
+
+    cv::Vec3b c((uchar)color[0], (uchar)color[1], (uchar)color[2]);
+
+    while (true) {
+        if (x1 >= 0 && x1 < img.cols && y1 >= 0 && y1 < img.rows)
+            img.at<cv::Vec3b>(y1, x1) = c;
+
+        if (x1 == x2 && y1 == y2) break;
+
+        int e2 = err << 1;
+        if (e2 >= dy) { err += dy; x1 += sx; }
+        if (e2 <= dx) { err += dx; y1 += sy; }
+    }
+}
+
+// ===================================================================
+// 辅助函数：画水平线
+// VS修改：原使用 cv::line，现改为调用 bres_line（Bresenham 算法，与 zgc_draw_tool.cpp dbg_line 一致）
+// ===================================================================
+// VS原始代码：
+// static inline void h_line(cv::Mat& img, int y, const cv::Scalar& c) {
+//     cv::line(img, cv::Point(0, y), cv::Point(img.cols - 1, y), c, 1);
+// }
+// VS修改后：
 static inline void h_line(cv::Mat& img, int y, const cv::Scalar& c) {
-    cv::line(img, cv::Point(0, y), cv::Point(img.cols - 1, y), c, 1);
+    bres_line(img, 0, y, img.cols - 1, y, c);
 }
         
 // ===================================================================
@@ -71,6 +106,7 @@ bool VSInference::init(const std::vector<std::string>& _labels,
     // ---- 3. 预分配图像缓冲区（复用，避免每帧分配） ----
     src = cv::Mat(UVC_HEIGHT, UVC_WIDTH, CV_8UC3);
     roi = cv::Mat(cfg.box_size, cfg.box_size, CV_8UC3);
+    tx_frame = cv::Mat(UVC_HEIGHT, UVC_WIDTH, CV_8UC3);
 
     // HSV 降采样缓冲区
     if (cfg.hsv_scale > 1) {
@@ -95,6 +131,38 @@ bool VSInference::init(const std::vector<std::string>& _labels,
     if (cfg.en_terminal_output) printf("权重LUT初始化完成 (%d entries)\n", lut_size + 1);
 
     return true;
+}
+
+bool VSInference::init_smartcar_defaults(void* ext_uvc)
+{
+    set_external_camera(ext_uvc);
+
+    // 默认参数统一来自 vs_inference.hpp 的“VS 调参区”宏。
+    // 此处保留赋值，便于后续如果 main 侧先改 cfg，也能用默认配置一键覆盖。
+    cfg.en_guidelines = (VS_ENABLE_GUIDELINES != 0);
+    cfg.box_size = VS_BOX_SIZE;
+    cfg.box_y_offset = VS_BOX_Y_OFFSET_PX;
+    cfg.area_min = VS_AREA_MIN;
+    cfg.area_max = VS_AREA_MAX;
+    cfg.zone_end_y = VS_ZONE_END_Y;
+    cfg.zone_area_max = VS_ZONE_AREA_MAX;
+    cfg.hsv_scale = VS_HSV_SCALE;
+    cfg.cx_min = VS_CX_MIN;
+    cfg.cx_max = VS_CX_MAX;
+    cfg.by_min = VS_BY_MIN;
+    cfg.by_max = VS_BY_MAX;
+    cfg.lost_frames = VS_LOST_FRAMES;
+    cfg.min_track = VS_MIN_TRACK;
+    cfg.result_cooldown_ms = VS_RESULT_COOLDOWN_MS;
+    cfg.exp_alpha = VS_EXP_ALPHA;
+
+    // 标签顺序必须与模型输出顺序一致；mean/norm 必须与训练/导出预处理一致。
+    static const std::vector<std::string> k_labels = {
+        "爆炸物", "急救包", "救护车", "枪械", "望远镜", "装甲车"};
+    float mean_vals[3] = {VS_NORM_MEAN};
+    float norm_vals[3] = {VS_NORM_VAL};
+
+    return init(k_labels, mean_vals, norm_vals);
 }
 
 // ===================================================================
@@ -144,6 +212,7 @@ bool VSInference::tick()
     // ---- 6.10 BGR → RGB565 写入 image_copy（不发送，由上层决定） ----
     bgr_to_rgb565(src);
 
+    fps_count++;
     return true;
 }
 
@@ -158,12 +227,9 @@ bool VSInference::tick_bgr(const cv::Mat& bgr)
     // ---- 核心处理（色块检测 + NCNN 推理 + 跟踪状态机）----
     process_frame(src);
 
-    // ---- 图传输出（仅图传开启时执行，关图传时跳过省算力）----
-    if (cfg.en_guidelines) {
-        draw_guidelines(src);
-        bgr_to_rgb565(src);
-    }
-
+    // 图传输出统一由 build_color_block_roi_image()/build_color_debug_image() 按需生成。
+    // 这里不画辅助线、不做 RGB565 转换，避免每帧重复开销。
+    fps_count++;
     return true;
 }
 
@@ -188,6 +254,7 @@ void VSInference::process_frame(cv::Mat& src)
     cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
     has_best  = false;
+    roi_valid = false;
     best_by   = -1;
     best_area = 0;
 
@@ -219,8 +286,8 @@ void VSInference::process_frame(cv::Mat& src)
         int amax = (by < cfg.zone_end_y) ? cfg.zone_area_max : cfg.area_max;
         if (area > amax) continue;
 
-        cv::Point tl(cx - half, by - cfg.box_size + 1);
-        cv::Point br(cx + half - 1, by);
+        cv::Point tl(cx - half, by - cfg.box_size + 1 + cfg.box_y_offset);
+        cv::Point br(cx + half - 1, by + cfg.box_y_offset);
 
         bool xok = (cx >= cfg.cx_min && cx <= cfg.cx_max);
         bool yok = (by >= cfg.by_min && by <= cfg.by_max);
@@ -252,11 +319,10 @@ void VSInference::process_frame(cv::Mat& src)
     }
 
     if (in_zone) {
-        rectangle(src, best_tl, best_br, cv::Scalar(0, 255, 0), 1);
-
         int xs = std::max(0, best_tl.x), xe = std::min(UVC_WIDTH - 1, best_br.x);
         int ys = std::max(0, best_tl.y), ye = std::min(UVC_HEIGHT - 1, best_br.y);
         src(cv::Rect(xs, ys, xe - xs + 1, ye - ys + 1)).copyTo(roi);
+        roi_valid = !roi.empty();
 
         try {
             auto* net = static_cast<LQ_NCNN*>(ncnn);
@@ -290,6 +356,9 @@ void VSInference::process_frame(cv::Mat& src)
     }
     else {
         if (state == TRACKING) {
+            if (lost_cnt == 0) {
+                lost_since = std::chrono::steady_clock::now();
+            }
             lost_cnt++;
             if (lost_cnt >= cfg.lost_frames) {
                 // 跟踪帧数不足 → 直接丢弃本次统计，复位到 IDLE
@@ -305,7 +374,6 @@ void VSInference::process_frame(cv::Mat& src)
                     state = IDLE;
                 } else {
                     state = LOST;
-                    lost_since = std::chrono::steady_clock::now();
                 }
             }
         }
@@ -320,15 +388,113 @@ void VSInference::process_frame(cv::Mat& src)
 }
 
 // ===================================================================
+// build_color_block_roi_image — 将绿色检测框内 ROI 居中输出到 image_copy
+//   调用时机：tick()/tick_bgr() 之后。
+//   用途：黑色背景 + 原尺寸 ROI 居中 + 保留绿色框，不做放缩。
+// ===================================================================
+bool VSInference::build_color_block_roi_image()
+{
+    if (!roi_valid || roi.empty()) {
+        return false;
+    }
+
+    tx_frame.setTo(cv::Scalar(0, 0, 0));
+    const int roi_w = std::min(roi.cols, UVC_WIDTH);
+    const int roi_h = std::min(roi.rows, UVC_HEIGHT);
+    const int dst_x = (UVC_WIDTH - roi_w) / 2;
+    const int dst_y = (UVC_HEIGHT - roi_h) / 2;
+
+    cv::Rect src_rect(0, 0, roi_w, roi_h);
+    cv::Rect dst_rect(dst_x, dst_y, roi_w, roi_h);
+    roi(src_rect).copyTo(tx_frame(dst_rect));
+    rectangle(tx_frame,
+              cv::Point(dst_rect.x, dst_rect.y),
+              cv::Point(dst_rect.x + dst_rect.width - 1,
+                        dst_rect.y + dst_rect.height - 1),
+              cv::Scalar(0, 255, 0),
+              1);
+
+    bgr_to_rgb565(tx_frame);
+    return true;
+}
+
+// ===================================================================
+// build_color_debug_image — 输出 VS 整帧彩色调试界面
+//   调用时机：tick()/tick_bgr() 之后。
+//   只在真正需要图传 VS 调试界面时才画绿色框和辅助线，降低普通推理路径开销。
+// ===================================================================
+bool VSInference::build_color_debug_image()
+{
+    if (src.empty()) {
+        return false;
+    }
+
+    const bool need_box = roi_valid;
+    const bool need_guidelines = cfg.en_guidelines;
+    if (!need_box && !need_guidelines)
+    {
+        bgr_to_rgb565(src);
+        return true;
+    }
+
+    src.copyTo(tx_frame);
+    if (need_box)
+    {
+        const int xs = std::max(0, best_tl.x);
+        const int xe = std::min(UVC_WIDTH - 1, best_br.x);
+        const int ys = std::max(0, best_tl.y);
+        const int ye = std::min(UVC_HEIGHT - 1, best_br.y);
+        if (xe >= xs && ye >= ys)
+        {
+            rectangle(tx_frame,
+                      cv::Point(xs, ys),
+                      cv::Point(xe, ye),
+                      cv::Scalar(0, 255, 0),
+                      1);
+        }
+    }
+    if (need_guidelines)
+    {
+        draw_guidelines(tx_frame);
+    }
+    bgr_to_rgb565(tx_frame);
+    return true;
+}
+
+// ===================================================================
 // output_final — 物体消失后汇总投票，输出最终结果
 // ===================================================================
 void VSInference::output_final()
 {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_result_time != std::chrono::steady_clock::time_point::min())
+    {
+        const long long cooldown_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_result_time).count();
+        if (cooldown_ms < cfg.result_cooldown_ms)
+        {
+            if (cfg.en_terminal_output)
+            {
+                printf("[COOLDOWN] drop final result, remain=%lld ms\n",
+                       static_cast<long long>(cfg.result_cooldown_ms) - cooldown_ms);
+            }
+            state = IDLE;
+            track_cnt = 0;
+            lost_cnt = 0;
+            votes.clear();
+            best_w = 0;
+            best_label = "";
+            return;
+        }
+    }
+
     final_cat   = classify_label(best_label);
     final_label = best_label;
     final_weight = best_w;
     final_frames = track_cnt;
+    final_lost_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - lost_since).count();
     result_ready = true;
+    last_result_time = now;
 
     if (cfg.en_terminal_output) {
         printf("\n========================================\n");
@@ -351,10 +517,14 @@ void VSInference::draw_guidelines(cv::Mat& src)
     h_line(src, cfg.zone_end_y, cv::Scalar(0, 0, 255));     // 红色: 分区边界
     h_line(src, cfg.by_min,     cv::Scalar(0, 255, 255));    // 黄色: 有效区 Y 下界
     h_line(src, cfg.by_max,     cv::Scalar(0, 255, 255));    // 黄色: 有效区 Y 上界
-    cv::line(src, cv::Point(cfg.cx_min, 0), cv::Point(cfg.cx_min, src.rows - 1),
-             cv::Scalar(0, 255, 255), 1);
-    cv::line(src, cv::Point(cfg.cx_max, 0), cv::Point(cfg.cx_max, src.rows - 1),
-             cv::Scalar(0, 255, 255), 1);
+    // VS原始代码：
+    // cv::line(src, cv::Point(cfg.cx_min, 0), cv::Point(cfg.cx_min, src.rows - 1),
+    //          cv::Scalar(0, 255, 255), 1);
+    // cv::line(src, cv::Point(cfg.cx_max, 0), cv::Point(cfg.cx_max, src.rows - 1),
+    //          cv::Scalar(0, 255, 255), 1);
+    // VS修改：改用 bres_line（Bresenham 算法，与 zgc_draw_tool.cpp dbg_line 一致）
+    bres_line(src, cfg.cx_min, 0, cfg.cx_min, src.rows - 1, cv::Scalar(0, 255, 255));
+    bres_line(src, cfg.cx_max, 0, cfg.cx_max, src.rows - 1, cv::Scalar(0, 255, 255));
 }
 
 // ===================================================================
@@ -378,12 +548,31 @@ void VSInference::bgr_to_rgb565(cv::Mat& src)
 // 结果查询接口
 // ===================================================================
 bool        VSInference::has_new_result() const { return result_ready; }
+bool VSInference::consume_new_result(std::string& result)
+{
+    if (!result_ready)
+    {
+        return false;
+    }
+
+    result = final_cat;
+    printf("Final Result: %s\r\n", result.c_str());
+    printf("物体离开等待: %lld ms\r\n", final_lost_ms);
+    result_ready = false;
+    return true;
+}
 std::string VSInference::get_label()    const { return final_label; }
 std::string VSInference::get_result()   const { return final_cat; }
 std::string VSInference::get_category() const { return final_cat; }
 float       VSInference::get_weight()   const { return final_weight; }
 int         VSInference::get_frames()   const { return final_frames; }
 void        VSInference::clear_result() { result_ready = false; }
+int VSInference::take_fps_count()
+{
+    const int count = fps_count;
+    fps_count = 0;
+    return count;
+}
 
 bool        VSInference::is_tracking()        const { return track_cnt >= cfg.min_track; }
 std::string VSInference::get_tracking_label() const { return best_label; }

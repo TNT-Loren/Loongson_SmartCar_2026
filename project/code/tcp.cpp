@@ -1,7 +1,18 @@
 #include "tcp.hpp"
 #include "image_test.hpp"
+#include "vs_inference.hpp"
 #include <atomic>
 #include <cstring>
+
+#define TCP_IMAGE_SOURCE_TRACK 0
+#define TCP_IMAGE_SOURCE_VS    1   //lgy
+
+// 图传矩阵选择：巡线使用 TRACK，队友推理使用 VS。
+#define TCP_IMAGE_SOURCE 1
+
+#if TCP_IMAGE_SOURCE != TCP_IMAGE_SOURCE_TRACK && TCP_IMAGE_SOURCE != TCP_IMAGE_SOURCE_VS
+#error "TCP_IMAGE_SOURCE must select TRACK or VS"
+#endif
 
 // 静态对象，仅在当前文件内可见，符合封装原则
 zf_driver_tcp_client tcp_client_dev;
@@ -65,10 +76,18 @@ bool tcp_image_transmission_init(const char *ip, int port)
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
 
-       seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660, g_tcp_camera_image[0], image_width, image_height);
-         // seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, image_copy[0], image_width, image_height);
-        // seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_MT9V03X, bin_image[0], image_width, image_height);
-         return true;
+#if TCP_IMAGE_SOURCE == TCP_IMAGE_SOURCE_VS
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660,
+                                                     g_vs.image_copy[0],
+                                                     UVC_WIDTH,
+                                                     UVC_HEIGHT);
+#else
+        seekfree_assistant_camera_information_config(SEEKFREE_ASSISTANT_SCC8660,
+                                                     g_tcp_camera_image[0],
+                                                     image_width,
+                                                     image_height);
+#endif
+        return true;
     }
     else
     {
@@ -78,11 +97,24 @@ bool tcp_image_transmission_init(const char *ip, int port)
 
 }
 
+// VS模式生成彩色ROI；没有有效ROI时生成完整彩色调试图。巡线模式下为空操作。
+void tcp_camera_update_vs_image(void)
+{
+#if TCP_IMAGE_SOURCE == TCP_IMAGE_SOURCE_VS
+    if (!g_vs.build_color_block_roi_image())
+    {
+        g_vs.build_color_debug_image();
+    }
+#endif
+}
+
 // 将当前调试图复制到 TCP 专用缓冲区，避免网络发送期间占用图像锁。
 void tcp_camera_snapshot_debug_image(void)
 {
+#if TCP_IMAGE_SOURCE == TCP_IMAGE_SOURCE_TRACK
     std::lock_guard<std::mutex> lock(g_image_mutex);
     std::memcpy(g_tcp_camera_image, debug_image, sizeof(g_tcp_camera_image));
+#endif
 }
 
 //读取故障状态的同时把它清零
