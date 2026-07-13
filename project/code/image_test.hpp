@@ -227,8 +227,8 @@ void cycle_test_midline_mode(void);                            // 键盘调试�
 const char *test_midline_mode_name(TestMidlineMode mode);      // 返回测试中线模式名
 void cycle_ipm_reliable_edge_mode(void);                       // 键盘调试：切换IPM可靠边选择模式
 const char *reliable_edge_mode_name(ReliableEdgeMode mode);    // 返回IPM可靠边模式名
-void trigger_obstacle_avoid(ObstacleAvoidDirection direction);  // 触发 1s 绕行：Left=左边线为临时中线，Right=右边线为临时中线
-void obstacle_avoid_5ms_task(void);                             // 5ms 倒计时任务，200 tick 后恢复正常 IPM 偏移
+void trigger_obstacle_avoid(ObstacleAvoidDirection direction);  // 触发定时绕行：Left=左边线为临时中线，Right=右边线为临时中线
+void obstacle_avoid_5ms_task(void);                             // 5ms 倒计时任务，到期后恢复正常 IPM 偏移
 bool obstacle_avoid_active(void);                               // 当前是否处于绕行状态
 ObstacleAvoidDirection current_obstacle_avoid_direction(void);  // 当前绕行方向
 const char *obstacle_avoid_direction_name(ObstacleAvoidDirection direction);

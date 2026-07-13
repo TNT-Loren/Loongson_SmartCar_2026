@@ -53,7 +53,7 @@ void master_scheduler_callback()
     encoder_update_task(dt);
     imu_update_task(dt);
     Beep_Task_5ms();
-    // 绕行只需要一个 1s 倒计时，挂在 5ms 主节拍上比额外线程更确定。
+    // 绕行倒计时挂在 5ms 主节拍上，持续时间在 image_test.cpp 中统一配置。
     obstacle_avoid_5ms_task();
 
     tick_5ms++; // 时间轴向前推移

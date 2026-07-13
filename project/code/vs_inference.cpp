@@ -15,27 +15,38 @@ class LQ_NCNN;
 // ===================================================================
 // 辅助函数：Bresenham 直线（cv::Mat 版本）
 // VS添加：移植自 zgc_draw_tool.cpp 的 dbg_line，适配 cv::Mat BGR 图像
-//   纯整数 Bresenham 算法，无浮点、无除法，与 dbg_line 逻辑一致
+// 纯整数 Bresenham 算法，无浮点、无除法，与 dbg_line 逻辑一致
 // ===================================================================
-static inline void bres_line(cv::Mat& img, int x1, int y1, int x2, int y2, const cv::Scalar& color) {
+static inline void bres_line(cv::Mat &img, int x1, int y1, int x2, int y2, const cv::Scalar &color)
+{
     // VS添加：Bresenham 算法核心，与 zgc_draw_tool.cpp dbg_line 保持一致
-    int dx  = abs(x2 - x1);
-    int sx  = (x1 < x2) ? 1 : -1;
-    int dy  = -abs(y2 - y1);
-    int sy  = (y1 < y2) ? 1 : -1;
+    int dx = abs(x2 - x1);
+    int sx = (x1 < x2) ? 1 : -1;
+    int dy = -abs(y2 - y1);
+    int sy = (y1 < y2) ? 1 : -1;
     int err = dx + dy;
 
     cv::Vec3b c((uchar)color[0], (uchar)color[1], (uchar)color[2]);
 
-    while (true) {
+    while (true)
+    {
         if (x1 >= 0 && x1 < img.cols && y1 >= 0 && y1 < img.rows)
             img.at<cv::Vec3b>(y1, x1) = c;
 
-        if (x1 == x2 && y1 == y2) break;
+        if (x1 == x2 && y1 == y2)
+            break;
 
         int e2 = err << 1;
-        if (e2 >= dy) { err += dy; x1 += sx; }
-        if (e2 <= dx) { err += dx; y1 += sy; }
+        if (e2 >= dy)
+        {
+            err += dy;
+            x1 += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y1 += sy;
+        }
     }
 }
 
@@ -48,17 +59,22 @@ static inline void bres_line(cv::Mat& img, int x1, int y1, int x2, int y2, const
 //     cv::line(img, cv::Point(0, y), cv::Point(img.cols - 1, y), c, 1);
 // }
 // VS修改后：
-static inline void h_line(cv::Mat& img, int y, const cv::Scalar& c) {
+static inline void h_line(cv::Mat &img, int y, const cv::Scalar &c)
+{
     bres_line(img, 0, y, img.cols - 1, y, c);
 }
-        
+
 // ===================================================================
 // classify_label — 标签到分类的映射（唯一维护点）
 // ===================================================================
-std::string VSInference::classify_label(const std::string& label) {
-    if (label == "急救包" || label == "望远镜")      return "物资";
-    if (label == "救护车" || label == "装甲车")      return "载具";
-    if (label == "爆炸物" || label == "枪械")        return "武器";
+std::string VSInference::classify_label(const std::string &label)
+{
+    if (label == "急救包" || label == "望远镜")
+        return "物资";
+    if (label == "救护车" || label == "装甲车")
+        return "载具";
+    if (label == "爆炸物" || label == "枪械")
+        return "武器";
     return "错误"; // 不应该出现的标签
 }
 
@@ -66,41 +82,63 @@ std::string VSInference::classify_label(const std::string& label) {
 // init — 初始化摄像头 + NCNN 模型 + 权重 LUT
 //   不涉及任何 TCP/图传通信，由上层负责
 // ===================================================================
-bool VSInference::init(const std::vector<std::string>& _labels,
+bool VSInference::init(const std::vector<std::string> &_labels,
                        float mean_vals[3], float norm_vals[3])
 {
     labels = _labels;
 
+    if (cfg.finalize_y < cfg.by_max || cfg.finalize_y >= UVC_HEIGHT)
+    {
+        printf("VS finalize_y must be within [%d, %d], current=%d\r\n",
+               cfg.by_max, UVC_HEIGHT - 1, cfg.finalize_y);
+        return false;
+    }
+
     // ---- 1. UVC 摄像头 ----
-    if (ext_uvc_dev == nullptr) {
+    if (ext_uvc_dev == nullptr)
+    {
         // 未设置外部摄像头时，自己打开
-        auto* uvc = new UVCDev();
-        if (uvc->init(UVC_PATH) < 0) {
+        auto *uvc = new UVCDev();
+        if (uvc->init(UVC_PATH) < 0)
+        {
             printf("uvc init error\r\n");
-            delete uvc; return false;
+            delete uvc;
+            return false;
         }
-        if (cfg.en_terminal_output) printf("uvc init ok\r\n");
+#if VS_ENABLE_TERMINAL_OUTPUT
+        printf("uvc init ok\r\n");
+#endif
         uvc_dev = uvc;
-    } else {
+    }
+    else
+    {
         // 使用外部共享摄像头，不重复 open /dev/video0
         uvc_dev = ext_uvc_dev;
-        if (cfg.en_terminal_output) printf("vs use external uvc ok\r\n");
+#if VS_ENABLE_TERMINAL_OUTPUT
+        printf("vs use external uvc ok\r\n");
+#endif
     }
 
     // ---- 2. NCNN 模型 ----
-    auto* net = new LQ_NCNN();
+    auto *net = new LQ_NCNN();
     net->SetModelPath(cfg.model_param.c_str(), cfg.model_bin.c_str());
     net->SetInputSize(cfg.box_size, cfg.box_size);
     net->SetLabels(labels);
     net->SetNormalize(mean_vals, norm_vals);
-    if (cfg.en_terminal_output) printf("正在加载NCNN模型...\n");
-    if (!net->Init()) {
+#if VS_ENABLE_TERMINAL_OUTPUT
+    printf("正在加载NCNN模型...\n");
+#endif
+    if (!net->Init())
+    {
         printf("NCNN模型加载失败!\n");
         delete net;
-        if (ext_uvc_dev == nullptr) delete static_cast<UVCDev*>(uvc_dev);
+        if (ext_uvc_dev == nullptr)
+            delete static_cast<UVCDev *>(uvc_dev);
         return false;
     }
-    if (cfg.en_terminal_output) printf("NCNN模型加载成功!\n");
+#if VS_ENABLE_TERMINAL_OUTPUT
+    printf("NCNN模型加载成功!\n");
+#endif
     ncnn = net;
 
     // ---- 3. 预分配图像缓冲区（复用，避免每帧分配） ----
@@ -109,48 +147,58 @@ bool VSInference::init(const std::vector<std::string>& _labels,
     tx_frame = cv::Mat(UVC_HEIGHT, UVC_WIDTH, CV_8UC3);
 
     // HSV 降采样缓冲区
-    if (cfg.hsv_scale > 1) {
-        hsv_w = UVC_WIDTH  / cfg.hsv_scale;
+    if (cfg.hsv_scale > 1)
+    {
+        hsv_w = UVC_WIDTH / cfg.hsv_scale;
         hsv_h = UVC_HEIGHT / cfg.hsv_scale;
         src_small = cv::Mat(hsv_h, hsv_w, CV_8UC3);
-    } else {
+    }
+    else
+    {
         hsv_w = UVC_WIDTH;
         hsv_h = UVC_HEIGHT;
     }
 
     // ---- 4. 预计算 Y 方向指数权重 LUT ----
-    lut_ofs  = cfg.by_min;
+    lut_ofs = cfg.by_min;
     lut_size = cfg.by_max - cfg.by_min;
-    for (int y = 0; y <= lut_size; y++) {
+    for (int y = 0; y <= lut_size; y++)
+    {
         int by = y + lut_ofs;
         float yn = (float)(by - cfg.by_min) / (cfg.by_max - cfg.by_min);
-        if (yn < 0) yn = 0;
-        if (yn > 1) yn = 1;
+        if (yn < 0)
+            yn = 0;
+        if (yn > 1)
+            yn = 1;
         weight_lut[y] = expf(cfg.exp_alpha * yn);
     }
-    if (cfg.en_terminal_output) printf("权重LUT初始化完成 (%d entries)\n", lut_size + 1);
+#if VS_ENABLE_TERMINAL_OUTPUT
+    printf("权重LUT初始化完成 (%d entries)\n", lut_size + 1);
+#endif
 
     return true;
 }
 
-bool VSInference::init_smartcar_defaults(void* ext_uvc)
+bool VSInference::init_smartcar_defaults(void *ext_uvc)
 {
     set_external_camera(ext_uvc);
 
     // 默认参数统一来自 vs_inference.hpp 的“VS 调参区”宏。
     // 此处保留赋值，便于后续如果 main 侧先改 cfg，也能用默认配置一键覆盖。
-    cfg.en_guidelines = (VS_ENABLE_GUIDELINES != 0);
     cfg.box_size = VS_BOX_SIZE;
     cfg.box_y_offset = VS_BOX_Y_OFFSET_PX;
     cfg.area_min = VS_AREA_MIN;
     cfg.area_max = VS_AREA_MAX;
+#if VS_ENABLE_ZONE_AREA_MAX
     cfg.zone_end_y = VS_ZONE_END_Y;
     cfg.zone_area_max = VS_ZONE_AREA_MAX;
+#endif
     cfg.hsv_scale = VS_HSV_SCALE;
     cfg.cx_min = VS_CX_MIN;
     cfg.cx_max = VS_CX_MAX;
     cfg.by_min = VS_BY_MIN;
     cfg.by_max = VS_BY_MAX;
+    cfg.finalize_y = VS_FINALIZE_Y;
     cfg.lost_frames = VS_LOST_FRAMES;
     cfg.min_track = VS_MIN_TRACK;
     cfg.result_cooldown_ms = VS_RESULT_COOLDOWN_MS;
@@ -169,7 +217,7 @@ bool VSInference::init_smartcar_defaults(void* ext_uvc)
 // set_external_camera — 设置外部共享摄像头（避免重复 open /dev/video0）
 //   调用时机：在 init() 之前调用
 // ===================================================================
-void VSInference::set_external_camera(void* ext_uvc)
+void VSInference::set_external_camera(void *ext_uvc)
 {
     ext_uvc_dev = ext_uvc;
 }
@@ -179,37 +227,41 @@ void VSInference::set_external_camera(void* ext_uvc)
 // ===================================================================
 bool VSInference::tick()
 {
-    auto* uvc = static_cast<UVCDev*>(uvc_dev);
+    auto *uvc = static_cast<UVCDev *>(uvc_dev);
 
     // ---- 6.1 阻塞等待新帧 ----
-    if (uvc->wait_image_refresh() < 0) {
+    if (uvc->wait_image_refresh() < 0)
+    {
         printf("camera refresh error\r\n");
         return false;
     }
 
     // ---- 6.2 获取 RGB565 指针 ----
     rgb_image = uvc->get_rgb_image_ptr();
-    if (!rgb_image) return true;
+    if (!rgb_image)
+        return true;
 
     // ---- 6.3 RGB565 → BGR ----
-    for (int y = 0; y < UVC_HEIGHT; y++) {
-        const uint16_t* s = rgb_image + y * UVC_WIDTH;
-        uint8_t* d = src.ptr<uint8_t>(y);
-        for (int x = 0; x < UVC_WIDTH; x++) {
+    for (int y = 0; y < UVC_HEIGHT; y++)
+    {
+        const uint16_t *s = rgb_image + y * UVC_WIDTH;
+        uint8_t *d = src.ptr<uint8_t>(y);
+        for (int x = 0; x < UVC_WIDTH; x++)
+        {
             uint16_t v = s[x];
-            d[3*x]     = (v & 0x1F) << 3;
-            d[3*x+1]   = ((v >> 5) & 0x3F) << 2;
-            d[3*x+2]   = ((v >> 11) & 0x1F) << 3;
+            d[3 * x] = (v & 0x1F) << 3;
+            d[3 * x + 1] = ((v >> 5) & 0x3F) << 2;
+            d[3 * x + 2] = ((v >> 11) & 0x1F) << 3;
         }
     }
 
     // ---- 6.4~6.8 核心处理 ----
     process_frame(src);
 
-    // ---- 6.9 辅助线 ----
-    if (cfg.en_guidelines) draw_guidelines(src);
+    // 绘制统一延迟到 build_color_block_roi_image()/build_color_debug_image()。
+    // TCP 关闭时上层不会构建图传画面，因此矩形和辅助线都不会执行。
 
-    // ---- 6.10 BGR → RGB565 写入 image_copy（不发送，由上层决定） ----
+    // ---- 6.9 BGR → RGB565 写入 image_copy（不发送，由上层决定） ----
     bgr_to_rgb565(src);
 
     fps_count++;
@@ -219,7 +271,7 @@ bool VSInference::tick()
 // ===================================================================
 // tick_bgr — 处理外部传入的 BGR 帧（共享巡线同一帧，不调用 wait）
 // ===================================================================
-bool VSInference::tick_bgr(const cv::Mat& bgr)
+bool VSInference::tick_bgr(const cv::Mat &bgr)
 {
     // 直接拷贝外部 BGR 帧到内部工作缓冲区
     bgr.copyTo(src);
@@ -228,7 +280,7 @@ bool VSInference::tick_bgr(const cv::Mat& bgr)
     process_frame(src);
 
     // 图传输出统一由 build_color_block_roi_image()/build_color_debug_image() 按需生成。
-    // 这里不画辅助线、不做 RGB565 转换，避免每帧重复开销。
+    // 这里不执行任何绘制，也不做 RGB565 转换；TCP 关闭时没有绘制开销。
     fps_count++;
     return true;
 }
@@ -236,10 +288,10 @@ bool VSInference::tick_bgr(const cv::Mat& bgr)
 // ===================================================================
 // process_frame — 色块检测 → 轮廓筛选 → 跟踪状态机 → NCNN 推理
 // ===================================================================
-void VSInference::process_frame(cv::Mat& src)
+void VSInference::process_frame(cv::Mat &src)
 {
     // ---- 选择检测图像（降采样以降低算力）----
-    cv::Mat& detect = (cfg.hsv_scale > 1) ? src_small : src;
+    cv::Mat &detect = (cfg.hsv_scale > 1) ? src_small : src;
     if (cfg.hsv_scale > 1)
         cv::resize(src, src_small, cv::Size(hsv_w, hsv_h));
 
@@ -253,137 +305,223 @@ void VSInference::process_frame(cv::Mat& src)
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    has_best  = false;
+    has_best = false;
     roi_valid = false;
-    best_by   = -1;
+    best_by = -1;
+#if VS_ENABLE_TERMINAL_OUTPUT
     best_area = 0;
+#endif
 
     int half = cfg.box_size / 2;
 
     // ---- 筛选最优目标 ----
-    for (size_t i = 0; i < contours.size(); i++) {
+    for (size_t i = 0; i < contours.size(); i++)
+    {
         int area = (int)contourArea(contours[i]);
 
         cv::RotatedRect rr = minAreaRect(contours[i]);
-        cv::Point2f v[4]; rr.points(v);
+        cv::Point2f v[4];
+        rr.points(v);
         int by = (int)v[0].y;
         for (int j = 1; j < 4; j++)
-            if (v[j].y > by) by = v[j].y;
+            if (v[j].y > by)
+                by = v[j].y;
 
         int cx = (int)rr.center.x;
 
         // ---- 坐标从降采样空间映射回原始分辨率（320×240）----
-        if (cfg.hsv_scale > 1) {
-            cx   *= cfg.hsv_scale;
-            by   *= cfg.hsv_scale;
+        if (cfg.hsv_scale > 1)
+        {
+            cx *= cfg.hsv_scale;
+            by *= cfg.hsv_scale;
             area *= (cfg.hsv_scale * cfg.hsv_scale);
         }
 
         // 过滤噪点（面积阈值在原始分辨率空间，不受 hsv_scale 影响）
-        if (area < cfg.area_min) continue;
+        if (area < cfg.area_min)
+            continue;
 
-        // 两段分区面积上限
-        int amax = (by < cfg.zone_end_y) ? cfg.zone_area_max : cfg.area_max;
-        if (area > amax) continue;
+        // 默认统一使用 area_max；启用后，上半区改用更严格的独立面积上限。
+#if VS_ENABLE_ZONE_AREA_MAX
+        const int amax = (by < cfg.zone_end_y) ? cfg.zone_area_max : cfg.area_max;
+        if (area > amax)
+            continue;
+#else
+        if (area > cfg.area_max)
+            continue;
+#endif
 
         cv::Point tl(cx - half, by - cfg.box_size + 1 + cfg.box_y_offset);
         cv::Point br(cx + half - 1, by + cfg.box_y_offset);
 
+        // 只允许已经建立的目标越过 LUT 上限继续靠近结算线；
+        // IDLE/LOST 状态仍必须先在正常有效区内建立或恢复跟踪。
+        const bool extending_track = (state == TRACKING || state == WAIT_CLEAR);
+        const int y_max = extending_track
+                              ? std::min(UVC_HEIGHT - 1, cfg.finalize_y + cfg.hsv_scale)
+                              : cfg.by_max;
         bool xok = (cx >= cfg.cx_min && cx <= cfg.cx_max);
-        bool yok = (by >= cfg.by_min && by <= cfg.by_max);
-        if (!xok || !yok) continue;
+        bool yok = (by >= cfg.by_min && by <= y_max);
+        if (!xok || !yok)
+            continue;
 
-        if (!has_best || by > best_by) {
-            has_best  = true;
-            best_by   = by;
+        if (!has_best || by > best_by)
+        {
+            has_best = true;
+            best_by = by;
+#if VS_ENABLE_TERMINAL_OUTPUT
             best_area = area;
-            best_tl   = tl;
-            best_br   = br;
+#endif
+            best_tl = tl;
+            best_br = br;
         }
     }
 
-    if (cfg.en_terminal_output && has_best)
+#if VS_ENABLE_TERMINAL_OUTPUT
+    if (has_best)
         printf("[AREA] %d px\r\n", best_area);
+#endif
+
+    // 提前结算后锁定本目标，直到检测区连续空闲若干帧再允许下一轮识别。
+    // 这样急救包上的红色区域不会被当成新色块继续推理或重复投票。
+    if (state == WAIT_CLEAR)
+    {
+        if (has_best)
+        {
+            lost_cnt = 0;
+        }
+        else if (++lost_cnt >= cfg.lost_frames)
+        {
+            lost_cnt = 0;
+            state = IDLE;
+#if VS_ENABLE_TERMINAL_OUTPUT
+            printf("[REARM] red target cleared, ready for next target\r\n");
+#endif
+        }
+        return;
+    }
 
     // ---- 跟踪状态机 ----
-    int obj_cx  = (best_tl.x + best_br.x) / 2;
-    int obj_by  = best_by;
+    int obj_by = best_by;
 
-    // 有效区判定：跟踪中放宽边界，补偿 hsv 降采样量化抖动
+    // 建立跟踪后允许越过 LUT 上限到结算线；LUT 索引会钳制在末端。
     bool in_zone;
-    if (state == TRACKING) {
-        int m = cfg.hsv_scale;  // 量化容差 (hsv_scale=4 → ±4px)
-        in_zone = (has_best && obj_by >= cfg.by_min - m && obj_by <= cfg.by_max + m);
-    } else {
+    if (state == TRACKING)
+    {
+        int m = cfg.hsv_scale; // 量化容差 (hsv_scale=4 → ±4px)
+        in_zone = (has_best && obj_by >= cfg.by_min - m &&
+                   obj_by <= cfg.finalize_y + m);
+    }
+    else
+    {
         in_zone = (has_best && obj_by >= cfg.by_min && obj_by <= cfg.by_max);
     }
 
-    if (in_zone) {
+    if (in_zone)
+    {
         int xs = std::max(0, best_tl.x), xe = std::min(UVC_WIDTH - 1, best_br.x);
         int ys = std::max(0, best_tl.y), ye = std::min(UVC_HEIGHT - 1, best_br.y);
         src(cv::Rect(xs, ys, xe - xs + 1, ye - ys + 1)).copyTo(roi);
         roi_valid = !roi.empty();
 
-        try {
-            auto* net = static_cast<LQ_NCNN*>(ncnn);
+        try
+        {
+            auto *net = static_cast<LQ_NCNN *>(ncnn);
+#if VS_ENABLE_TERMINAL_OUTPUT
             auto t0 = std::chrono::steady_clock::now();
+#endif
             std::string r = net->Infer(roi);
+#if VS_ENABLE_TERMINAL_OUTPUT
             auto t1 = std::chrono::steady_clock::now();
             long long us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+#endif
 
             int yo = obj_by - lut_ofs;
-            if (yo < 0) yo = 0;
-            if (yo > lut_size) yo = lut_size;
+            if (yo < 0)
+                yo = 0;
+            if (yo > lut_size)
+                yo = lut_size;
             float w = weight_lut[yo];
 
             votes[r] += w;
-            if (votes[r] > best_w) { best_w = votes[r]; best_label = r; }
+            if (votes[r] > best_w)
+            {
+                best_w = votes[r];
+                best_label = r;
+            }
 
-            if (state == LOST) lost_cnt = 0;
+            if (state == LOST)
+                lost_cnt = 0;
             state = TRACKING;
             tracked_by = obj_by;
             track_cnt++;
 
-            if (cfg.en_terminal_output) {
-                printf("[TRACK #%d] center=(%d,%d) w=%.2f -> %s | %s (%lld us)\r\n",
-                       track_cnt, obj_cx, obj_by, w,
-                       r.c_str(), classify_label(r).c_str(), us);
+#if VS_ENABLE_TERMINAL_OUTPUT
+            const int obj_cx = (best_tl.x + best_br.x) / 2;
+            printf("[TRACK #%d] center=(%d,%d) w=%.2f -> %s | %s (%lld us)\r\n",
+                   track_cnt, obj_cx, obj_by, w,
+                   r.c_str(), classify_label(r).c_str(), us);
+#endif
+
+            // 投票从进入有效区时就开始累计；到达结算线后立即使用现有票数输出，
+            // 不再等待红色目标完全离开，也不再执行后续帧推理。
+            if (obj_by >= cfg.finalize_y && track_cnt >= cfg.min_track)
+            {
+#if VS_ENABLE_TERMINAL_OUTPUT
+                printf("[FINALIZE] target reached y=%d (line=%d)\r\n",
+                       obj_by, cfg.finalize_y);
+#endif
+                output_final(true);
+                state = WAIT_CLEAR;
+                lost_cnt = 0;
+                return;
             }
         }
-        catch (const std::exception& e) {
+        catch (const std::exception &e)
+        {
             std::cerr << "[NCNN异常] " << e.what() << std::endl;
         }
     }
-    else {
-        if (state == TRACKING) {
-            if (lost_cnt == 0) {
+    else
+    {
+        if (state == TRACKING)
+        {
+            if (lost_cnt == 0)
+            {
                 lost_since = std::chrono::steady_clock::now();
             }
             lost_cnt++;
-            if (lost_cnt >= cfg.lost_frames) {
+            if (lost_cnt >= cfg.lost_frames)
+            {
                 // 跟踪帧数不足 → 直接丢弃本次统计，复位到 IDLE
-                if (track_cnt < cfg.min_track) {
-                    if (cfg.en_terminal_output)
-                        printf("[DROP] track_cnt=%d < min_track=%d, reset\n",
-                               track_cnt, cfg.min_track);
+                if (track_cnt < cfg.min_track)
+                {
+#if VS_ENABLE_TERMINAL_OUTPUT
+                    printf("[DROP] track_cnt=%d < min_track=%d, reset\n",
+                           track_cnt, cfg.min_track);
+#endif
                     track_cnt = 0;
                     lost_cnt = 0;
                     votes.clear();
                     best_w = 0;
                     best_label = "";
                     state = IDLE;
-                } else {
+                }
+                else
+                {
                     state = LOST;
                 }
             }
         }
-        else if (state == LOST) {
+        else if (state == LOST)
+        {
             lost_cnt++;
         }
     }
 
-    if (state == LOST && lost_cnt >= cfg.lost_frames && track_cnt >= cfg.min_track) {
-        output_final();
+    if (state == LOST && lost_cnt >= cfg.lost_frames && track_cnt >= cfg.min_track)
+    {
+        output_final(false);
     }
 }
 
@@ -394,7 +532,8 @@ void VSInference::process_frame(cv::Mat& src)
 // ===================================================================
 bool VSInference::build_color_block_roi_image()
 {
-    if (!roi_valid || roi.empty()) {
+    if (!roi_valid || roi.empty())
+    {
         return false;
     }
 
@@ -425,17 +564,19 @@ bool VSInference::build_color_block_roi_image()
 // ===================================================================
 bool VSInference::build_color_debug_image()
 {
-    if (src.empty()) {
+    if (src.empty())
+    {
         return false;
     }
 
     const bool need_box = roi_valid;
-    const bool need_guidelines = cfg.en_guidelines;
-    if (!need_box && !need_guidelines)
+#if !VS_ENABLE_GUIDELINES
+    if (!need_box)
     {
         bgr_to_rgb565(src);
         return true;
     }
+#endif
 
     src.copyTo(tx_frame);
     if (need_box)
@@ -453,18 +594,17 @@ bool VSInference::build_color_debug_image()
                       1);
         }
     }
-    if (need_guidelines)
-    {
-        draw_guidelines(tx_frame);
-    }
+#if VS_ENABLE_GUIDELINES
+    draw_guidelines(tx_frame);
+#endif
     bgr_to_rgb565(tx_frame);
     return true;
 }
 
 // ===================================================================
-// output_final — 物体消失后汇总投票，输出最终结果
+// output_final — 汇总投票并输出最终结果
 // ===================================================================
-void VSInference::output_final()
+void VSInference::output_final(bool immediate)
 {
     const auto now = std::chrono::steady_clock::now();
     if (last_result_time != std::chrono::steady_clock::time_point::min())
@@ -473,11 +613,10 @@ void VSInference::output_final()
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_result_time).count();
         if (cooldown_ms < cfg.result_cooldown_ms)
         {
-            if (cfg.en_terminal_output)
-            {
-                printf("[COOLDOWN] drop final result, remain=%lld ms\n",
-                       static_cast<long long>(cfg.result_cooldown_ms) - cooldown_ms);
-            }
+#if VS_ENABLE_TERMINAL_OUTPUT
+            printf("[COOLDOWN] drop final result, remain=%lld ms\n",
+                   static_cast<long long>(cfg.result_cooldown_ms) - cooldown_ms);
+#endif
             state = IDLE;
             track_cnt = 0;
             lost_cnt = 0;
@@ -488,35 +627,45 @@ void VSInference::output_final()
         }
     }
 
-    final_cat   = classify_label(best_label);
+    final_cat = classify_label(best_label);
     final_label = best_label;
     final_weight = best_w;
     final_frames = track_cnt;
-    final_lost_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - lost_since).count();
+    final_lost_ms = immediate
+                        ? 0
+                        : std::chrono::duration_cast<std::chrono::milliseconds>(now - lost_since).count();
     result_ready = true;
     last_result_time = now;
 
-    if (cfg.en_terminal_output) {
-        printf("\n========================================\n");
-        printf("[FINAL] label: %s | category: %s | weight: %.2f | frames: %d\n",
-               final_label.c_str(), final_cat.c_str(), final_weight, final_frames);
-        printf("[FINAL] vote breakdown:\n");
-        for (auto& kv : votes) printf("  %s: %.2f\n", kv.first.c_str(), kv.second);
-        printf("========================================\n\n");
-    }
+#if VS_ENABLE_TERMINAL_OUTPUT
+    printf("\n========================================\n");
+    printf("[FINAL] label: %s | category: %s | weight: %.2f | frames: %d\n",
+           final_label.c_str(), final_cat.c_str(), final_weight, final_frames);
+    printf("[FINAL] vote breakdown:\n");
+    for (auto &kv : votes)
+        printf("  %s: %.2f\n", kv.first.c_str(), kv.second);
+    printf("========================================\n\n");
+#endif
 
-    state = IDLE; track_cnt = 0; lost_cnt = 0;
-    votes.clear(); best_w = 0; best_label = "";
+    state = IDLE;
+    track_cnt = 0;
+    lost_cnt = 0;
+    votes.clear();
+    best_w = 0;
+    best_label = "";
 }
 
 // ===================================================================
 // draw_guidelines — 辅助线叠加
 // ===================================================================
-void VSInference::draw_guidelines(cv::Mat& src)
+void VSInference::draw_guidelines(cv::Mat &src)
 {
-    h_line(src, cfg.zone_end_y, cv::Scalar(0, 0, 255));     // 红色: 分区边界
-    h_line(src, cfg.by_min,     cv::Scalar(0, 255, 255));    // 黄色: 有效区 Y 下界
-    h_line(src, cfg.by_max,     cv::Scalar(0, 255, 255));    // 黄色: 有效区 Y 上界
+#if VS_ENABLE_ZONE_AREA_MAX
+    h_line(src, cfg.zone_end_y, cv::Scalar(0, 0, 255)); // 红色: 分区边界
+#endif
+    h_line(src, cfg.by_min, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 下界
+    h_line(src, cfg.by_max, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 上界
+    h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 提前结算线
     // VS原始代码：
     // cv::line(src, cv::Point(cfg.cx_min, 0), cv::Point(cfg.cx_min, src.rows - 1),
     //          cv::Scalar(0, 255, 255), 1);
@@ -531,13 +680,15 @@ void VSInference::draw_guidelines(cv::Mat& src)
 // bgr_to_rgb565 — BGR 图像转换为 RGB565 写入 image_copy
 //   上层调用 seekfree_assistant_camera_send() 将 image_copy 发出
 // ===================================================================
-void VSInference::bgr_to_rgb565(cv::Mat& src)
+void VSInference::bgr_to_rgb565(cv::Mat &src)
 {
-    for (int y = 0; y < src.rows; ++y) {
-        const uint8_t* row = src.ptr<uint8_t>(y);
-        uint16_t* dst = image_copy[y];
-        for (int x = 0; x < src.cols; ++x) {
-            uint8_t b = row[3*x], g = row[3*x+1], r = row[3*x+2];
+    for (int y = 0; y < src.rows; ++y)
+    {
+        const uint8_t *row = src.ptr<uint8_t>(y);
+        uint16_t *dst = image_copy[y];
+        for (int x = 0; x < src.cols; ++x)
+        {
+            uint8_t b = row[3 * x], g = row[3 * x + 1], r = row[3 * x + 2];
             uint16_t v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
             dst[x] = ((v & 0xFF) << 8) | ((v & 0xFF00) >> 8);
         }
@@ -547,8 +698,8 @@ void VSInference::bgr_to_rgb565(cv::Mat& src)
 // ===================================================================
 // 结果查询接口
 // ===================================================================
-bool        VSInference::has_new_result() const { return result_ready; }
-bool VSInference::consume_new_result(std::string& result)
+bool VSInference::has_new_result() const { return result_ready; }
+bool VSInference::consume_new_result(std::string &result)
 {
     if (!result_ready)
     {
@@ -561,12 +712,12 @@ bool VSInference::consume_new_result(std::string& result)
     result_ready = false;
     return true;
 }
-std::string VSInference::get_label()    const { return final_label; }
-std::string VSInference::get_result()   const { return final_cat; }
+std::string VSInference::get_label() const { return final_label; }
+std::string VSInference::get_result() const { return final_cat; }
 std::string VSInference::get_category() const { return final_cat; }
-float       VSInference::get_weight()   const { return final_weight; }
-int         VSInference::get_frames()   const { return final_frames; }
-void        VSInference::clear_result() { result_ready = false; }
+float VSInference::get_weight() const { return final_weight; }
+int VSInference::get_frames() const { return final_frames; }
+void VSInference::clear_result() { result_ready = false; }
 int VSInference::take_fps_count()
 {
     const int count = fps_count;
@@ -574,11 +725,14 @@ int VSInference::take_fps_count()
     return count;
 }
 
-bool        VSInference::is_tracking()        const { return track_cnt >= cfg.min_track; }
+bool VSInference::is_tracking() const { return track_cnt >= cfg.min_track; }
 std::string VSInference::get_tracking_label() const { return best_label; }
 std::string VSInference::get_tracking_result() const { return classify_label(best_label); }
-long long   VSInference::get_lost_ms()    const {
-    if (state != LOST) return 0;
+long long VSInference::get_lost_ms() const
+{
+    if (state != LOST)
+        return 0;
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - lost_since).count();
+               std::chrono::steady_clock::now() - lost_since)
+        .count();
 }

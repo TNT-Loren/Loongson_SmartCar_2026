@@ -1,0 +1,123 @@
+TO DO
+
+//======================
+A:
+
+
+
+h:按键合并
+开机自启动
+优化函数{大津法、二值化、四元素}
+=------------------------
+B：
+不依赖于TCP
+
+//=================================
+7.13
+2. 异常 dt 为什么危险
+{
+    正常情况下，调度器每 5 ms 读取一次编码器：
+speed = 编码器脉冲数 / 4635.6 / dt * 10
+相关代码在 [scheduler.cpp (line 36)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/scheduler.cpp:36) 和 [encoder.cpp (line 37)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/Control/Control_Source/encoder.cpp:37)。
+举个例子，假设正常 5 ms 内产生 100 个脉冲：
+速度 = 100 / 4635.6 / 0.005 * 10 ≈ 43.1
+如果控制线程因系统调度、驱动调用等原因卡住 500 ms，那么编码器可能累计约 10000 个脉冲。此时代码检测到 dt > 0.2，却把 dt 改成 0.005：
+错误速度 = 10000 / 4635.6 / 0.005 * 10 ≈ 4314
+真实速度 = 10000 / 4635.6 / 0.5 * 10 ≈ 43.1
+虽然当前编码器计数先经过 0.25 系数的滤波，但第一次恢复时仍大约会得到：
+滤波计数 = 0.75 × 100 + 0.25 × 10000 = 2575
+反馈速度 ≈ 1111
+假设目标速度为 95，PID 看到的误差会突然变成约 95 - 1111 = -1016。速度 PID 很容易立即达到负向限幅，最终在 [scheduler.cpp (line 125)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/scheduler.cpp:125) 输出接近 -50，即电机突然强力反转或制动。之后滤波值还需要几个周期才能衰减，车辆可能连续抖动。
+更长的停顿还可能让脉冲数超过 int16_t 的 32767，在 [encoder.cpp (line 40)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/Control/Control_Source/encoder.cpp:40) 转换时发生符号翻转。
+推荐这样优化：
+使用 steady_clock 计算时间，保证单调递增。
+不要把异常的真实 dt 伪造成 5 ms。
+发生严重超时时直接停车、丢弃累计脉冲、清 PID，并跳过本轮控制。
+正常周期中先用真实 dt 算“原始速度”，再对速度进行滤波，而不是先滤波脉冲再除以变化的 dt。
+核心处理可以设计为：
+if (dt > k_control_timeout)
+{
+    motor_stop();
+    pwm_l = pwm_r = 0.0f;
+
+    encoder_reset();       // 清硬件计数、速度值和滤波状态
+    pid_left.clear();
+    pid_right.clear();
+    pid_angle.clear();
+
+    dt_sum_10ms = 0.0f;
+    return;                // 本周期不运行 PID
+}
+建议设置两个阈值：例如超过 20～30 ms 记录调度异常，超过 100～200 ms执行停车保护。具体阈值需要根据实车 Linux 调度抖动测试确定。
+}
+
+
+
+
+//更改摄像头位置
+如果摄像头的高度、俯仰角、左右位置或朝向发生变化，最重要的是重新标定 IPM。PID 参数不是第一优先级，应该先保证图像坐标正确。
+必须修改：IPM 矩阵
+当前原图到 IPM 的 3×3 矩阵在 [image_test.cpp (line 767)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:767)：
+constexpr double k_image_to_ipm_mat[3][3] = {
+    {3.880868..., 6.833939..., -221.200...},
+    {0.071098..., 13.161169..., -252.156...},
+    {0.001562..., 0.084822..., 1},
+};
+下列任何变化都会使旧矩阵失效：
+摄像头安装高度改变
+俯仰角改变
+摄像头左右移动
+摄像头没有正对车头，发生偏航
+更换镜头或视场角
+修改输入分辨率、裁剪范围或缩放方式
+当前矩阵使用的是原始 320×240 图像缩放后的 160×120 坐标，缩放代码在 [image_test.cpp (line 5130)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:5130)。重新标定时，采点也必须使用缩放后的 160×120 坐标，不能直接把 320×240 坐标填进矩阵。
+标定完成后应检查：
+直道左右边线在 IPM 中基本平行
+车辆正前方的赛道中线接近 x = 79
+同一条赛道从近处到远处宽度变化不大
+左右边线没有整体倾斜或横向漂移
+需要验证：车身参考点
+Pure Pursuit 当前认为车辆位于 IPM 坐标：
+constexpr float k_vehicle_x = 79.0f;
+constexpr float k_vehicle_y = 138.0f;
+位置在 [car_control.cpp (line 28)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/car_control.cpp:28)。
+其中：
+k_vehicle_x 是车辆中心在 IPM 中的横坐标。
+k_vehicle_y 是车辆后方的虚拟参考点，允许位于 120 图像范围之外。
+如果重新生成的 IPM 仍保持相同坐标尺度，并让车辆中心仍对应 x≈79，这两个参数可以不改。否则必须重新确定，特别是摄像头左右移动后，k_vehicle_x 很容易不再是 79。
+需要验证：IPM 路宽和中线偏移
+正常巡线使用可靠边向内偏移半个路宽：
+constexpr float k_ipm_default_midline_offset_px = 22.5f;
+位置在 [image_test.cpp (line 55)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:55)。
+重新标定后，在直道上测量：
+IPM 路宽 = 右边线 x - 左边线 x
+中线偏移 = IPM 路宽 / 2
+例如新 IPM 路宽约为 50 px，就应改为：
+k_ipm_default_midline_offset_px = 25.0f;
+如果重新标定时保持原来的 IPM 尺度和约 45 px 路宽，则仍可使用 22.5。
+绕行偏移 -5.0f 在 [image_test.cpp (line 346)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:346)，也需要重新实车确认，但它不是普通巡线的基础参数。
+通常需要微调：前视距离
+不同场景的 Pure Pursuit 前视距离在 [car_control.cpp (line 86)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/car_control.cpp:86)：
+Straight       44.2f
+GentleCurve    44.0f
+SharpCurve     40.0f
+Circle         34.0f
+ObstacleAvoid  20.0f
+如果 IPM 尺度保持不变，先不要改。只有出现以下现象再调：
+直线左右摆动：适当增大前视距离
+入弯太迟：适当减小前视距离
+弯道转向过激：适当增大前视距离或降低最大角度
+弯道切弯不足：适当减小前视距离
+必须先完成 IPM 标定，再调前视和 PID，否则会用控制参数掩盖几何误差。
+可能需要调整：搜线起始区域
+当前从图像倒数第 2 行开始找赛道，最多向上尝试 7 行：
+调用位置：[image_test.cpp (line 4367)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:4367)
+搜索行数：[image_test.cpp (line 2000)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:2000)
+如果摄像头改变后，图像底部看不到完整的左右边线，就需要调整摄像头角度，或者扩大向上搜索范围。优先调整安装和标定，不建议一开始就修改大量搜线阈值。
+光照参数
+位置或角度变化后，赛道反光程度可能改变，需要重新检查：
+曝光值 100：[main.cpp (line 109)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/user/main.cpp:109)
+OTSU 额外偏置 +10：[image_test.cpp (line 4349)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/image_test.cpp:4349)
+曝光不合适会表现为边线断裂、阴影被识别成黑线或白色赛道过曝。
+如果以后重新启用 AI，还要重新检查 [vs_inference.hpp (line 15)](/home/loren/桌面/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/vs_inference.hpp:15) 中的识别区域、面积阈值和 ROI 偏移；只巡线时这些参数不用管。
+推荐调整顺序是：固定机械位置和分辨率 → 调曝光 → 重新计算 IPM 矩阵 → 校准 k_vehicle_x/y 和 IPM 路宽 → 调前视距离 → 最后才调 PID。

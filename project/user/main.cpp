@@ -94,12 +94,13 @@ int main(int, char **)
         std::cout << "  1 " << std::endl;
         return -1; // 摄像头初始化失败，直接退出程序
     }
-    g_vs_ready = g_vs.init_smartcar_defaults(&uvc_dev);
-    if (!g_vs_ready)
-    {
-        printf("vs init failed, AI/图传降级跳过\r\n");
-    }
-    // ===== VS添加结束 =====
+    // VS/NCNN 初始化
+    //  g_vs_ready = g_vs.init_smartcar_defaults(&uvc_dev);
+    //  if (!g_vs_ready)
+    //  {
+    //      printf("vs init failed, AI/图传降级跳过\r\n");
+    //  }
+    //  ===== VS添加结束 =====
 
     atexit(cleanup);
     signal(SIGINT, sigint_handler);
@@ -142,31 +143,31 @@ int main(int, char **)
         }
         fps_timer_end();
         // ===== VS添加：AI视觉推理 — 复用巡线已抓帧，彩色给AI，不额外等帧 =====
-        if (g_vs_ready)
-        {
-            cv::Mat color_frame = uvc_dev.get_frame_mjpg();
-            if (!g_vs.tick_bgr(color_frame))
-            {
-                printf("vs.tick error\r\n");
-            }
-            else
-            {
-                tcp_camera_update_vs_image();
-            }
-            if (g_vs.consume_new_result(result))
-            {
-                // AI结果映射绕行：武器→左绕  物资→右绕  载具→直行压过
-                if (result == "武器")
-                {
-                    trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
-                }
-                else if (result == "物资")
-                {
-                    trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
-                }
-                // 载具/交通工具 → 直行，不触发绕行
-            }
-        }
+        // if (g_vs_ready)
+        // {
+        //     cv::Mat color_frame = uvc_dev.get_frame_mjpg();
+        //     if (!g_vs.tick_bgr(color_frame))
+        //     {
+        //         printf("vs.tick error\r\n");
+        //     }
+        //     else
+        //     {
+        //         tcp_camera_update_vs_image();
+        //     }
+        //     if (g_vs.consume_new_result(result))
+        //     {
+        //         // AI结果映射绕行：武器→左绕  物资→右绕  载具→直行压过
+        //         if (result == "武器")
+        //         {
+        //             trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
+        //         }
+        //         else if (result == "物资")
+        //         {
+        //             trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
+        //         }
+        //         // 载具/交通工具 → 直行，不触发绕行
+        //     }
+        // }
         // ===== VS添加结束 =====
         if (need_print.load() == 1)
         {
@@ -191,16 +192,17 @@ int main(int, char **)
             //     std::cout << static_cast<int>(Mid_Line[i]) << " ,";
             // }
             // std::cout << "  " << std::endl;
-            // std::cout << "  " << std::endl;
-             
-            if (g_vs_ready)
-            {
-                printf("VS FPS: %d\r\n", g_vs.take_fps_count());
-            }
-            std::cout << static_cast<int>(Threshold) << std::endl;
+            std::cout << "fps: " << g_fps_value << std::endl;
+
+            // if (g_vs_ready)
+            // {
+            //     printf("VS FPS: %d\r\n", g_vs.take_fps_count());
+            // }
+            // std::cout << static_cast<int>(Threshold) << std::endl;
+
             need_print.store(0);
         }
-        system_delay_ms(10);
+        system_delay_ms(5);
     }
 }
 
@@ -358,7 +360,7 @@ void keyboard_poll_simple()
 
         case 'q':
         case 'Q':
-            // 手动模拟“左绕行”：用左边线作为 1s 临时中线参考。
+            // 手动模拟“左绕行”：用左边线作为定时临时中线参考。
             trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
             std::cout << "obstacle avoid -> L, offset="
                       << g_ipm_midline_offset_px.load()
@@ -367,7 +369,7 @@ void keyboard_poll_simple()
 
         case 'e':
         case 'E':
-            // 手动模拟“右绕行”：用右边线作为 1s 临时中线参考。
+            // 手动模拟“右绕行”：用右边线作为定时临时中线参考。
             trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
             std::cout << "obstacle avoid -> R, offset="
                       << g_ipm_midline_offset_px.load()
