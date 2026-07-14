@@ -24,19 +24,19 @@ TrackInfo g_track_info;
     //  float k_speed_circle = 105.0f;
     //  float k_speed_lost = 95.0f;
 
-     float k_speed_straight = 140.0f; // aaa
-     float k_speed_curve = 120.0f;
-     float k_speed_sharp = 100.0f;
-     float k_speed_obstacle_avoid = 40.0f; // 绕行
-     float k_speed_circle = 120.0f;
-     float k_speed_lost = 100.0f;
+    //  float k_speed_straight = 140.0f; // aaa
+    //  float k_speed_curve = 120.0f;
+    //  float k_speed_sharp = 100.0f;
+    //  float k_speed_obstacle_avoid = 40.0f; // 绕行
+    //  float k_speed_circle = 120.0f;
+    //  float k_speed_lost = 100.0f;
 
-     //  float k_speed_straight = 100.0f; // 713
-     //  float k_speed_curve = 80.0f;
-     //  float k_speed_sharp = 80.0f;
-     //  float k_speed_obstacle_avoid = 40.0f; // 绕行
-     //  float k_speed_circle = 80.0f;
-     //  float k_speed_lost = 80.0f;
+      float k_speed_straight = 100.0f; // 713
+      float k_speed_curve = 80.0f;
+      float k_speed_sharp = 80.0f;
+      float k_speed_obstacle_avoid = 40.0f; // 绕行
+      float k_speed_circle = 80.0f;
+      float k_speed_lost = 80.0f;
 
      // constexpr float k_speed_straight = 50.0f;
      // constexpr float k_speed_curve = 40.0f;

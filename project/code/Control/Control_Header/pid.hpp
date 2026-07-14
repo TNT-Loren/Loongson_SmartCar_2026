@@ -22,6 +22,10 @@ public:
     void set_pid(float p, float i, float d);
     void clear();
 
+    float *kp_ptr() { return &kp; }
+    float *ki_ptr() { return &ki; }
+    float *kd_ptr() { return &kd; }
+
     // 核心计算：必须包含 dt 参数
     float calc(float target, float current, float dt);
 };
@@ -44,6 +48,13 @@ public:
 
     void set_pid(float p, float i, float d);
     void clear();
+
+    float *kp_ptr() { return &kp; }
+    float *ki_ptr() { return &ki; }
+    float *kd_ptr() { return &kd; }
+    float *output_limit_ptr() { return &output_limit; }
+    float *integral_limit_ptr() { return &integral_limit; }
+    float *deadband_ptr() { return &deadband; }
 
     float calc(float target, float current, float dt);
     float calc(float target, float current, float dt, float dynamic_output_limit);

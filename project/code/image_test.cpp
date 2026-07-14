@@ -3805,7 +3805,7 @@ void Island_Detect(void)//环岛检测
             }
 
             //if (car.circle_intergrate_yaw < -40 || shortest_White_Column1[0] < 30)
-            if (car.circle_intergrate_yaw < -40)
+            if (car.circle_intergrate_yaw < -50)
             {
                 island_state = 4;
             }
@@ -3992,7 +3992,7 @@ void Island_Detect(void)//环岛检测
                 }
             }
             //if(car.circle_intergrate_yaw > 40 || shortest_White_Column1[0] < 30)
-            if (car.circle_intergrate_yaw > 40)
+            if (car.circle_intergrate_yaw > 50)
             {
                 island_state=4;
             }
@@ -4659,6 +4659,10 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
         std::snprintf(circle_text, sizeof(circle_text), "C%c", circle_dir);
         dbg_text_3x5(img, x + 2, y + 9, circle_text, state_color, bg_color, true);
         draw_circle_state_blocks(img, x + 14, y + 9, state_color, empty_color);
+
+        char yaw_text[16] = {0};
+        std::snprintf(yaw_text, sizeof(yaw_text), "YAW:%+.0f", car.circle_intergrate_yaw);
+        dbg_text_3x5(img, x + 2, y + 15, yaw_text, state_color, bg_color, true);
     }
 
     draw_lost_bar(img, x + 2, y + 20, "L", Left_Lost_Time, left_color, text_color, bg_color);
@@ -4728,7 +4732,7 @@ void draw_debug_status_bar(uint16 (*img)[image_width])
     const uint16 ok_color = debug_color(RGB565_GREEN);
     const uint16 cross_color = debug_color(RGB565_YELLOW);
     const uint16 circle_color = debug_color(RGB565_CYAN);
-    const uint16 mode_color = debug_color(RGB565_PURPLE);
+    const uint16 empty_color = debug_color(RGB565_GRAY);
     const uint16 bg_color = debug_color(RGB565_BLACK);
 
     dbg_fill_rect(img, 0, 0, image_width - 1, 7, bg_color);
@@ -4757,21 +4761,18 @@ void draw_debug_status_bar(uint16 (*img)[image_width])
     {
         dbg_fill_rect(img, 34, 1, 44, 6, cross_color);
     }
-    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle)
+    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)
     {
-        dbg_fill_rect(img, 48, 1, 58, 6, circle_color);
-    }
-    if (island_state != 0)
-    {
-        const int state_count = std::clamp<int>(island_state, 0, 6);
-        const int block_width = 4;
-        const int block_gap = 2;
-        const int block_x0 = 62;
-        for (int block = 0; block < state_count; ++block)
-        {
-            const int x0 = block_x0 + block * (block_width + block_gap);
-            dbg_fill_rect(img, x0, 1, x0 + block_width - 1, 6, mode_color);
-        }
+        char circle_text[4] = {0};
+        const char circle_dir = Image_Flag.Left_Circle ? 'L' :
+                                (Image_Flag.Right_Circle ? 'R' : '-');
+        std::snprintf(circle_text,
+                      sizeof(circle_text),
+                      "%c%d",
+                      circle_dir,
+                      std::clamp<int>(island_state, 0, 6));
+        dbg_text_3x5(img, 48, 1, circle_text, circle_color, bg_color, false);
+        draw_circle_state_blocks(img, 58, 1, circle_color, empty_color);
     }
 }
 
@@ -5003,6 +5004,12 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
                       obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
         dbg_text_6x8(img, 2, 30, avoid_text, debug_color(RGB565_RED), bg_color, false);
     }
+    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)
+    {
+        char yaw_text[16] = {0};
+        std::snprintf(yaw_text, sizeof(yaw_text), "YAW:%+.0f", car.circle_intergrate_yaw);
+        dbg_text_6x8(img, 2, 40, yaw_text, debug_color(RGB565_CYAN), bg_color, false);
+    }
 
     char error_text[24] = {0};
     std::snprintf(error_text, sizeof(error_text), "ERR:%+.1f", Line_Error);
@@ -5039,8 +5046,25 @@ void build_debug_image(bool show_binary)
     draw_debug_search_points(debug_image);
     draw_debug_corners(debug_image);
     draw_debug_status_bar(debug_image);
-    // IPM 实际选中的可靠边（Auto 时解析为 LEFT/RIGHT）
-    dbg_text_6x8(debug_image, 62, 0, reliable_edge_mode_name(selected_ipm_reliable_edge_mode()), debug_color(RGB565_YELLOW), debug_color(RGB565_BLACK), false);
+    // IPM 实际采用的可靠边。使用紧凑文字，避免覆盖 x=58~86 的圆环状态条。
+    const char *edge_text = "REL:R";
+    if (Control_Ipm_Debug_Scene == TrackScene::LostLine)
+    {
+        edge_text = "REL:B";
+    }
+    else if (debug_effective_selected_edge() == ReliableEdgeMode::ForceLeft)
+    {
+        edge_text = "REL:L";
+    }
+    dbg_text_3x5(debug_image, 90, 1, edge_text,
+                 debug_color(RGB565_YELLOW), debug_color(RGB565_BLACK), false);
+    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)
+    {
+        char yaw_text[16] = {0};
+        std::snprintf(yaw_text, sizeof(yaw_text), "YAW:%+.0f", car.circle_intergrate_yaw);
+        dbg_text_3x5(debug_image, 48, 9, yaw_text,
+                     debug_color(RGB565_CYAN), debug_color(RGB565_BLACK), false);
+    }
     // 当前赛道场景（右上角）
     {
         const char *scene_str = "Unknown";

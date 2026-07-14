@@ -1,5 +1,6 @@
 #include "scheduler.hpp"
 #include "beep.hpp"
+#include "common_MYmenu.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -64,6 +65,21 @@ void master_scheduler_callback()
         // 提取真实的控制周期并清零累加器
         float control_dt = dt_sum_10ms;
         dt_sum_10ms = 0.0f;
+
+        if (!Menu_Car_Enabled())
+        {
+            target_speed = 0.0f;
+            target_yaw = yaw;
+            pwm_l = 0.0f;
+            pwm_r = 0.0f;
+            base_start_speed = 0.0f;
+
+            pid_left.clear();
+            pid_right.clear();
+            pid_angle.clear();
+            motor_set_speed(0, 0);
+            return;
+        }
         // ==========================================================
         // 【第一阶段：读取滑块，现在全权交给角度环】
         // ==========================================================

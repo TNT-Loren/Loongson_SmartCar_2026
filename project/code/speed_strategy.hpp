@@ -33,6 +33,9 @@ extern float k_speed_sharp;
 extern float k_speed_obstacle_avoid;
 extern float k_speed_circle;
 extern float k_speed_lost;
+extern float k_speed_up_step;
+extern float k_speed_down_step;
+extern float k_large_alpha_slowdown_deg;
 
 // 基础速度计算接口
 float calc_base_speed(const TrackInfo &info);

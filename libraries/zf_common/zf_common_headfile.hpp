@@ -118,6 +118,7 @@
 #include "brushless.hpp"
 #include "zgc_draw_tool.hpp"
 #include "beep.hpp"
+#include "common_MYmenu.hpp"
 
 //===================================================用户自定义文件===================================================
 

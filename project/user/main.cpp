@@ -2,7 +2,7 @@
 #include "main.hpp"
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
-#include "tcp.hpp"
+
 
 // 提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
 #include "../code/vs_inference.hpp"
@@ -79,6 +79,7 @@ int main(int, char **)
      Encoder_Init();
      Beep_Init();
      motor_init();
+     Menu_Init();
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
         //    //tcp_bind_variables(&target_yaw, &yaw);
@@ -129,6 +130,7 @@ int main(int, char **)
 
     while (1)
     {
+        Menu_Task();
         //Set_Beeptime(5000);      // 响 500ms
         keyboard_poll_simple(); // 轮询键盘输入，供调试用
                                 // esc_set_speed_percent(test1);
@@ -260,6 +262,7 @@ void print_ipm_mid_points_snapshot()// 供调试用的函数：打印一帧 IPM 
 //================================================================
 void sigint_handler(int signum)
 {
+    Menu_Force_Stop();
     master_timer.stop();
     printf("收到Ctrl+C,程序即将退出\n");
     Beep(Off);
@@ -269,7 +272,7 @@ void sigint_handler(int signum)
 
 void cleanup()
 {
-
+    Menu_Force_Stop();
     keyboard_restore_simple();// 恢复键盘设置，防止程序退出后终端异常
     // 采用中央调度器，全车只有一个定时器
     master_timer.stop();
