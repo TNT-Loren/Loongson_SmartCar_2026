@@ -18,6 +18,7 @@
 zf_driver_tcp_client tcp_client_dev;
 static std::atomic<bool> g_tcp_camera_send_failed(false);
 static uint16 g_tcp_camera_image[image_height][image_width] = {{0}};
+static std::atomic<float> g_online_param_snapshot[SEEKFREE_ASSISTANT_SET_PARAMETR_COUNT];
 
 // 指针池：用于保存外部需要监控的变量地址
 static float *monitor_ch[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -36,6 +37,14 @@ static uint32 tcp_send_wrap(const uint8 *buf, uint32 len)
 }
 static uint32 tcp_read_wrap(uint8 *buf, uint32 len) { return tcp_client_dev.read_data(buf, len); }
 
+static void reset_online_param_snapshot()
+{
+    for (auto &param : g_online_param_snapshot)
+    {
+        param.store(0.0f, std::memory_order_relaxed);
+    }
+}
+
 /**
  * @brief  TCP 调试初始化
  * @param  ip   电脑 IP 地址
@@ -48,6 +57,7 @@ bool tcp_debug_init(const char *ip, int port)
     {
         tcp_client_dev.set_retry_param(2, 2);
         printf("TCP Client OK. 成功连接逐飞助手!\n");
+        reset_online_param_snapshot();
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
         return true;
@@ -73,6 +83,7 @@ bool tcp_image_transmission_init(const char *ip, int port)
     {
         tcp_client_dev.set_retry_param(2, 2);
         printf("TCP Client OK. 成功连接逐飞助手!\n");
+        reset_online_param_snapshot();
         // 初始化逐飞助手的底层收发接口
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
 
@@ -165,6 +176,10 @@ void tcp_update_task()
     // 3. 关键：处理上位机下发的滑块参数 (保证在线调参响应)
     // 这个函数会读取 TCP 接收缓冲区的数据并更新 seekfree_assistant_parameter 数组
     seekfree_assistant_data_analysis();
+    for (uint8_t i = 0; i < SEEKFREE_ASSISTANT_SET_PARAMETR_COUNT; ++i)
+    {
+        g_online_param_snapshot[i].store(seekfree_assistant_parameter[i], std::memory_order_relaxed);
+    }
 }
 
 /**
@@ -174,7 +189,7 @@ void tcp_update_task()
  */
 float get_online_param(uint8_t index)
 {
-    if (index > 7)
+    if (index >= SEEKFREE_ASSISTANT_SET_PARAMETR_COUNT)
         return 0.0f;
-    return seekfree_assistant_parameter[index];
+    return g_online_param_snapshot[index].load(std::memory_order_relaxed);
 }

@@ -1,11 +1,11 @@
 #include "pid.hpp"
 #include <cmath> // 用于 std::abs
 
-IncrementalPID pid_left(0.6f, 0.3f, 0.0f, 60.0f);
-IncrementalPID pid_right(0.6f, 0.3f, 0.0f, 60.0f);
-PositionalPID pid_angle(3.5f, 0.3f, 0.2f, 100.0f, 30.0f);
+IncrementalPID pid_left(0.74f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
+IncrementalPID pid_right(0.74f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
+PositionalPID pid_angle(5.2f, 0.0f, 0.12f, 100.0f, 30.0f);
 
-/*
+/*v
 当你写下 IncrementalPID speed_pid; 的那一瞬间，
 这个函数会自动运行。它负责把所有误差、输出都清零，
 确保你的 PID 刚诞生时是干净的，不会带着上一次运行的残余数据。
@@ -94,6 +94,12 @@ void PositionalPID::clear()
 {
     last_error = 0.0f;
     integral = 0.0f; // 清空积分池
+    skip_derivative_once = false;
+}
+
+void PositionalPID::suppress_derivative_once()
+{
+    skip_derivative_once = true;
 }
 
 static float wrap180f(float a)
@@ -119,6 +125,7 @@ float PositionalPID::calc(float target, float current, float dt, float dynamic_o
    {
        // 必须刷新 last_error，防止冲出死区时微分项（D）暴走
        last_error = error;
+       skip_derivative_once = false;
        // 角度环进入死区，意味着车身已正，必须输出 0 差速让其直行
        return 0.0f;
    }
@@ -129,7 +136,15 @@ float PositionalPID::calc(float target, float current, float dt, float dynamic_o
 
     // 【优化2】：底层除零与极小值保护
     float safe_dt = (dt > 0.0001f) ? dt : 0.005f;
-    float derivative = (error - last_error) / safe_dt;
+    float derivative = 0.0f;
+    if (skip_derivative_once)
+    {
+        skip_derivative_once = false;
+    }
+    else
+    {
+        derivative = (error - last_error) / safe_dt;
+    }
 
     float output = (kp * error) +
                    (ki * integral) +

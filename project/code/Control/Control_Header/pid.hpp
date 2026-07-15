@@ -3,6 +3,8 @@
 
 #include "zf_common_headfile.hpp"
 
+inline constexpr float k_speed_pwm_limit_percent = 55.0f;
+
 //============================================================增量式PID（速度环内环）
 class IncrementalPID
 {
@@ -41,6 +43,7 @@ private:
     float output_limit;
     float integral_limit;
     float deadband;
+    bool skip_derivative_once;
 
 public:
     PositionalPID();
@@ -48,6 +51,7 @@ public:
 
     void set_pid(float p, float i, float d);
     void clear();
+    void suppress_derivative_once();
 
     float *kp_ptr() { return &kp; }
     float *ki_ptr() { return &ki; }

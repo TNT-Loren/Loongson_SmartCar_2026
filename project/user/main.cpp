@@ -3,7 +3,7 @@
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
 
-
+//5.2 0.12 angle
 // 提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
 #include "../code/vs_inference.hpp"
 
@@ -89,6 +89,7 @@ int main(int, char **)
     {
         return -1;
     }
+   // tcp_bind_variables(&target_yaw, &yaw, &speed1, &speed2);
 
     if (uvc_dev.init(UVC_PATH) < 0)
     {
@@ -125,12 +126,11 @@ int main(int, char **)
     // 启动中央大脑！全车所有模块开始按时间片同步运转
     scheduler_init();
     Set_Beepfreq(3);
-    // test_front_point_patch_tools();
     std::string result;
 
     while (1)
     {
-        Menu_Task();
+       Menu_Task();
         //Set_Beeptime(5000);      // 响 500ms
         keyboard_poll_simple(); // 轮询键盘输入，供调试用
                                 // esc_set_speed_percent(test1);

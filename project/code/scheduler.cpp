@@ -4,12 +4,24 @@
 
 #include <iostream>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <unistd.h>  // 用于 usleep 和 nice
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
 extern TrackInfo g_track_info;
 
+namespace
+{
+constexpr bool k_speed_pid_tuning_mode = false;
+constexpr bool k_angle_pid_tuning_mode = false;
+constexpr float k_speed_tuning_target_max = 250.0f;
+constexpr float k_speed_tuning_gain_max = 20.0f;
+constexpr float k_angle_tuning_target_limit_deg = 180.0f;
+constexpr float k_angle_tuning_steer_limit = 30.0f;
+static_assert(!(k_speed_pid_tuning_mode && k_angle_pid_tuning_mode),
+              "Only one PID tuning mode can be enabled");
+}
 
 //#define base_speed 120.0f
 
@@ -20,7 +32,7 @@ std::atomic<uint8_t> need_print(0);
 
 // 确保 last_time 和 tick_5ms 是 static 的，防止每次回调被重新初始化
 static uint32_t tick_5ms = 0;
-static auto last_time = std::chrono::high_resolution_clock::now(); // 调度器专属的全局时间戳
+static auto last_time = std::chrono::steady_clock::now(); // 调度器专属的单调时间戳
 static float dt_sum_10ms = 0.0f;
 
 
@@ -33,39 +45,44 @@ float pwm_r = 0.0f;
 //====================================================================================================================
 void master_scheduler_callback()
 {
-    // ------------------ 1. 获取真实 dt ------------------
-    auto now = std::chrono::high_resolution_clock::now();
+    // 5 ms PIT 回调以单调时钟测量真实周期；dt 和后面的 control_dt 单位均为秒。
+    auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - last_time).count();
     last_time = now;
 
-    // ------------------ 2. 极端异常保护 ------------------
+    // 极短周期没有有效采样意义，直接忽略且不推进控制时间轴。
     if (dt <= 0.0001f)
         return;
     if (dt > 0.2f)
     {
-        dt = 0.005f;        // 强行截断，防止积分暴走
-        dt_sum_10ms = 0.0f; // 清空累加器，丢弃脏数据
+        // 长周期的数据已失真：丢弃累计脉冲和 10 ms 时间，不伪造 dt，也不突变当前 PWM。
+        // 角度环恢复后的第一个有效周期禁用 D，防止跨越长间隔产生微分冲击。
+        dt_sum_10ms = 0.0f;
+        encoder_clear_counts();
+        pid_angle.suppress_derivative_once();
+        return;
     }
 
-    // 累积控制周期时间
+    // 两次约 5 ms 的真实周期累加为一次速度/角度闭环使用的 control_dt。
     dt_sum_10ms += dt;
 
-    // ------------------ 3. 基础高频采样 (5ms) ------------------
+    // 5 ms 高频任务：编码器先按真实 dt 换算轮速，IMU 按真实 dt 积分 yaw。
     encoder_update_task(dt);
     imu_update_task(dt);
     Beep_Task_5ms();
     // 绕行倒计时挂在 5ms 主节拍上，持续时间在 image_test.cpp 中统一配置。
     obstacle_avoid_5ms_task();
 
-    tick_5ms++; // 时间轴向前推移
+    tick_5ms++; // 仅正常周期推进逻辑节拍，异常周期不会扰乱 10 ms 分频。
 
-    // ------------------ 4. 核心控制任务 (10ms) ------------------
+    // 10 ms 主闭环：控制目标 -> 左右轮目标速度 -> 速度 PID -> PWM。
     if (tick_5ms % 2 == 0)
     {
-        // 提取真实的控制周期并清零累加器
+        // 使用两次采样的真实累计时间，随后立即清零等待下一个控制周期。
         float control_dt = dt_sum_10ms;
         dt_sum_10ms = 0.0f;
 
+        // 发车安全门优先级最高。STOP 时持续清空全部闭环状态，禁止残留积分和 PWM。
         if (!Menu_Car_Enabled())
         {
             target_speed = 0.0f;
@@ -80,76 +97,86 @@ void master_scheduler_callback()
             motor_set_speed(0, 0);
             return;
         }
-        // ==========================================================
-        // 【第一阶段：读取滑块，现在全权交给角度环】
-        // ==========================================================
-        //  target_yaw = get_online_param(0); // 滑块0：基础直行速度 (建议先给 150)
-        // float angle_kp = get_online_param(1);   // 滑块1：角度环 P
-        // float angle_ki = get_online_param(2);   // 滑块2：角度环 I
-        // float angle_kd = get_online_param(3);   // 滑块3：角度环 D
 
-        // pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
-        // ==========================================================
-        // 【第二阶段：运行中环 (角度环 - 位置式 PID)】
-        // 目标：最终的绝对 target_yaw
-        // 如果后面接入视觉循迹，建议在这里使用：
-        // target_yaw = wrap_to_180(yaw + vision_delta_yaw);
-        // 其中 vision_delta_yaw 由 image_test() 基于 mid_line 计算得到，
-        // 表示“相对当前车头，还需要补多少角度”，而不是直接把图像偏差当 target_yaw。
-        // 反馈：全车的真实 yaw 角
-        // 输出：差速转向修正量 (steer)
-        // ==========================================================
-        float local_vision_target_yaw = yaw;
-        TrackInfo local_track_info;
+        // 三种模式最终都只发布左右轮目标速度，后面的速度内环保持完全一致。
+        float target_speed_l = 0.0f;
+        float target_speed_r = 0.0f;
+        if constexpr (k_speed_pid_tuning_mode)
         {
-            std::lock_guard<std::mutex> lock(g_vision_result_mutex); // RAII 锁
-            local_vision_target_yaw = vision_target_yaw;
-            local_track_info = g_track_info;
-        } //离开作用域 → lock 析构 → 自动解锁
+            // 速度环调参：绕过视觉和角度环，两轮使用相同目标；滑块0/1/2=速度/Kp/Ki。
+            target_speed = std::clamp(get_online_param(0), 0.0f, k_speed_tuning_target_max);
+            const float speed_kp = std::clamp(get_online_param(1), 0.0f, k_speed_tuning_gain_max);
+            const float speed_ki = std::clamp(get_online_param(2), 0.0f, k_speed_tuning_gain_max);
+            pid_left.set_pid(speed_kp, speed_ki, 0.0f);
+            pid_right.set_pid(speed_kp, speed_ki, 0.0f);
 
-        float base_speed = calc_base_speed(local_track_info); // 速度策略计算
-        constexpr float k_max_steer_ratio = 0.67f;// 转向修正最大占比，防止过度转向导致车轮抱死或侧滑失控
-        const float steer_limit = base_speed * k_max_steer_ratio;
-        float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt, steer_limit); // PID 角度环计算
-        //steer = std::clamp(steer, -steer_limit, steer_limit);
-        // // ==========================================================
-        // // 【第三阶段：核心纽带 —— 差速分配 (阿克曼/差速模型)】
-        // ==========================================================
-        float target_speed_l = base_speed + steer;
-        float target_speed_r = base_speed - steer;
+            target_yaw = yaw;
+            target_speed_l = target_speed;
+            target_speed_r = target_speed;
+        }
+        else if constexpr (k_angle_pid_tuning_mode)
+        {
+            // 角度环调参：滑块0/1/2/3/4=绝对yaw/基础速度/Kp/Ki/Kd。
+            // 固定 steer 限幅且允许负轮速，基础速度为 0 时可用 +steer/-steer 原地转向。
+            static float last_tuning_target_yaw = 0.0f;
+            static bool first_tuning_cycle = true;
+            target_yaw = std::clamp(get_online_param(0),
+                                    -k_angle_tuning_target_limit_deg,
+                                    k_angle_tuning_target_limit_deg);
+            target_speed = std::clamp(get_online_param(1), 0.0f, k_speed_tuning_target_max);
+            const float angle_kp = std::clamp(get_online_param(2), 0.0f, k_speed_tuning_gain_max);
+            const float angle_ki = std::clamp(get_online_param(3), 0.0f, k_speed_tuning_gain_max);
+            const float angle_kd = std::clamp(get_online_param(4), 0.0f, k_speed_tuning_gain_max);
+            const bool target_changed = std::fabs(target_yaw - last_tuning_target_yaw) > 1e-4f;
+            pid_angle.set_pid(angle_kp, angle_ki, angle_kd);
 
-        float min_wheel_speed = 0.0f;
-        // （之后可提升）最好做成“急弯/圆环专用增强转向”
-        //  if (local_track_info.scene == TrackScene::SharpCurve)
-        //  {
-        //      min_wheel_speed = -15.0f;
-        //  }
+            // 目标阶跃只屏蔽首周期 D；P、I 仍正常计算，后续 D 用于抑制 yaw 摆动。
+            if (first_tuning_cycle || target_changed)
+            {
+                pid_angle.suppress_derivative_once();
+            }
+            first_tuning_cycle = false;
+            const float steer = pid_angle.calc(target_yaw,
+                                               yaw,
+                                               control_dt,
+                                               k_angle_tuning_steer_limit);
+            target_speed_l = target_speed + steer;
+            target_speed_r = target_speed - steer;
+            last_tuning_target_yaw = target_yaw;
+        }
+        else
+        {
+            // 正式巡线模式只短暂持锁复制视觉快照，PID 和电机 I/O 均在锁外执行。
+            float local_vision_target_yaw = yaw;
+            TrackInfo local_track_info;
+            {
+                std::lock_guard<std::mutex> lock(g_vision_result_mutex);
+                local_vision_target_yaw = vision_target_yaw;
+                local_track_info = g_track_info;
+            }
 
-        target_speed_l = std::max(min_wheel_speed, target_speed_l);
-        target_speed_r = std::max(min_wheel_speed, target_speed_r);
+            // 速度策略输出基础轮速；角度 PID 输出同单位的单轮速度偏移 steer。
+            const float base_speed = calc_base_speed(local_track_info);
+            target_speed = base_speed;
+            target_yaw = local_vision_target_yaw;
+            // 正式模式按基础速度动态限制转向权限，避免低速/弯道时差速过度。
+            constexpr float k_max_steer_ratio = 0.67f;
+            const float steer_limit = base_speed * k_max_steer_ratio;
+            const float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt, steer_limit);
+            // 比赛模式不允许内轮倒转；正 steer 表示左轮加速、右轮减速，车辆向右转。
+            target_speed_l = std::max(0.0f, base_speed + steer);
+            target_speed_r = std::max(0.0f, base_speed - steer);
+        }
 
-        //===============================================================速度环内环
-        //  /////////////////调速度环PID用
-        // target_speed = get_online_param(0);
-        // kp = get_online_param(1);
-        // ki = get_online_param(2);
-        // 刷新 PID 参数
-        // pid_left.set_pid(kp, ki, 0.0f);
-        // pid_right.set_pid(kp, ki, 0.0f);
-        // 极度精准的闭环计算
-        //============================================
+        // 左右速度内环把轮速误差转换为 PWM 百分比，最终限幅与 PID 内部限幅使用同一常量。
         pwm_l = pid_left.calc(target_speed_l, speed1, control_dt);
         pwm_r = pid_right.calc(target_speed_r, speed2, control_dt);
-        // 软件限幅
-        pwm_l = std::clamp(pwm_l, -50.0f, 50.0f);
-        pwm_r = std::clamp(pwm_r, -50.0f, 50.0f);
-        // 驱动电机
+        pwm_l = std::clamp(pwm_l, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
+        pwm_r = std::clamp(pwm_r, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         motor_set_speed((int)pwm_l, (int)pwm_r);
-        //================================================
     }
 
-    // ------------------ 5. 低频心跳/打印任务 (1秒) ------------------
-    // 坚决不重置 tick_5ms，利用取模保证时间轴的绝对连贯！
+    // 约 1 秒发布一次低频状态标志；tick 不清零，保持调度时间轴连续。
     if (tick_5ms % 200 == 0)
     {
         need_print.store(1);
@@ -167,7 +194,7 @@ void tcp_background_thread()
     // 自适应退避的图传发送循环
     while (true)
     {
-       // tcp_update_task(); // 执行网络收发与调参读取
+        tcp_update_task(); // 上报速度曲线并接收在线调参滑块
         tcp_camera_snapshot_debug_image();
         seekfree_assistant_camera_send();
         if (tcp_camera_send_failed())           // 发送失败
@@ -188,7 +215,7 @@ void tcp_background_thread()
 void scheduler_init()
 {
     // 初始化时间戳
-    last_time = std::chrono::high_resolution_clock::now();
+    last_time = std::chrono::steady_clock::now();
     // 启动全车唯一的心脏，5ms 跳动一次
     master_timer.init_ms(5, master_scheduler_callback);
     // printf("中央调度器已启动 (基准周期: 5ms)\n");

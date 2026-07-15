@@ -20,12 +20,6 @@ struct RC_Para Encoder_L_Para = {0, 0, 0.25f};
 static RC_Filter_pt RC_Encoder_L_temp = &Encoder_L_Para;
 static RC_Filter_pt RC_Encoder_R_temp = &Encoder_R_Para;
 
-// 编码器计数变量
-int16_t Encoder_L = 0;
-int16_t Encoder_R = 0;
-int16_t RC_Encoder_L = 0;
-int16_t RC_Encoder_R = 0;
-
 // 低通滤波函数（与原实现等价）
 float RCFilter(float value, RC_Filter_pt Filter)
 {
@@ -36,38 +30,48 @@ float RCFilter(float value, RC_Filter_pt Filter)
 //===============================================================================
 void Encoder_Get(float dt)
 {
-    // 读取计数（保持原代码左右符号约定）
-    Encoder_L = (int16_t)encoder_quad_1.get_count();
-    Encoder_R = -(int16_t)encoder_quad_2.get_count();
+    // 保持原有左右符号约定。先以真实 dt 换算速度，避免滤波脉冲数受周期抖动影响。
+    const int32_t encoder_l_count = static_cast<int32_t>(encoder_quad_1.get_count());
+    const int32_t encoder_r_count = -static_cast<int32_t>(encoder_quad_2.get_count());
 
-   // 低通滤波
-    RC_Encoder_L = (int16_t)RCFilter((float)Encoder_L, RC_Encoder_L_temp);
-    RC_Encoder_R = (int16_t)RCFilter((float)Encoder_R, RC_Encoder_R_temp);
-
-    // speed1 = Encoder_L;
-    // speed2 = Encoder_R;
-    // 速度计算：与原公式保持一致
+    // 速度单位与原公式保持一致。
     //每圈CNT增加约4635.6，采样间隔原为0.005s，最后乘10放大
     //    /4632     9256     13905     18585   23178   ==>>每转一圈CNT+4635.6
     //     4629      9303   13943      18552   23220
-    speed1 = (float)((RC_Encoder_L / 4635.6f / dt) * 10.0f);
-    speed2 = (float)((RC_Encoder_R / 4635.6f / dt) * 10.0f);
 
-    encoder_quad_1.clear_count();
-    encoder_quad_2.clear_count();
+    // 实际速度 (cm/s) = speed × 2.05
+    // 实际速度 (m/s)  = speed × 0.0205
+    // speed 100 10 rps	2.05 m/s
+    const float raw_speed_l = static_cast<float>(encoder_l_count) * 10.0f / (4635.6f * dt);
+    const float raw_speed_r = static_cast<float>(encoder_r_count) * 10.0f / (4635.6f * dt);
+    speed1 = RCFilter(raw_speed_l, RC_Encoder_L_temp);
+    speed2 = RCFilter(raw_speed_r, RC_Encoder_R_temp);
+
+    encoder_clear_counts();
 }
 void encoder_update_task(float dt)
 {
     Encoder_Get(dt);
-    // 定时器清零
+}
+
+void encoder_clear_counts(void)
+{
     encoder_quad_1.clear_count();
     encoder_quad_2.clear_count();
 }
 
+void encoder_reset(void)
+{
+    encoder_clear_counts();
+    Encoder_L_Para.temp = 0.0f;
+    Encoder_L_Para.value = 0.0f;
+    Encoder_R_Para.temp = 0.0f;
+    Encoder_R_Para.value = 0.0f;
+    speed1 = 0.0f;
+    speed2 = 0.0f;
+}
+
 void Encoder_Init(void)
 {
-    // 清零计数，确保初始状态一致
-    encoder_quad_1.clear_count();
-    encoder_quad_2.clear_count();
-
+    encoder_reset();
 }

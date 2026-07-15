@@ -14,6 +14,8 @@ typedef struct RC_Para *RC_Filter_pt;
 // extern int16 RC_Encoder_L, RC_Encoder_R;  // 低通滤波后
 
 void Encoder_Init(void);
+void encoder_clear_counts(void);
+void encoder_reset(void);
 void encoder_update_task(float dt);
 
 #endif
