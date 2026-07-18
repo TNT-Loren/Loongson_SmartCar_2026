@@ -1,5 +1,6 @@
 #include "image_test.hpp"
 #include "car_control.hpp"
+#include "event_timer.hpp"
 #include "zgc_draw_tool.hpp"
 
 #include <algorithm>
@@ -52,6 +53,16 @@ namespace
     constexpr int k_circle_short_col_fallback_y = 20; // 状态三兜底点
 
     constexpr int k_circle_state2_no_monotonicity_timeout_frames = 20;//状态二到状态三的兜底次数
+    constexpr int k_circle_entry_confirm_frames = 3; // 左/右圆环入口均需连续命中的图像帧数。
+
+    // 圆环各状态事件的超时参数集中在此，实车标定时可独立修改。
+    constexpr auto k_circle_state1_entry_detected_timeout = std::chrono::milliseconds(4000);
+    constexpr auto k_circle_state2_wait_upper_arc_timeout = std::chrono::milliseconds(3000);
+    constexpr auto k_circle_state3_find_arc_timeout = std::chrono::milliseconds(3000);
+    constexpr auto k_circle_state4_exit_trend_timeout = std::chrono::milliseconds(5000);
+    constexpr auto k_circle_state5_repair_exit_line_timeout = std::chrono::milliseconds(3000);
+    constexpr auto k_circle_state6_recover_track_timeout = std::chrono::milliseconds(3000);
+    constexpr auto k_circle_normal_exit_reentry_cooldown = std::chrono::milliseconds(2000);
     // 正常巡线时，从可靠边法向偏移半个 IPM 路宽得到赛道中线。
     constexpr float k_ipm_default_midline_offset_px = 22.5f;
 
@@ -64,6 +75,8 @@ namespace
     IpmReliableEdge g_ipm_auto_reliable_edge = IpmReliableEdge::Left;
     IpmReliableEdge g_ipm_auto_reliable_edge_candidate = IpmReliableEdge::Left;
     int g_ipm_auto_reliable_edge_candidate_frames = 0;
+    int g_left_circle_entry_candidate_frames = 0;
+    int g_right_circle_entry_candidate_frames = 0;
     int g_left_circle_state2_no_monotonicity_frames = 0;
     int g_right_circle_state2_no_monotonicity_frames = 0;
     int g_left_circle_exit_mono_row = 0;//圆环出口单调点行号
@@ -74,6 +87,8 @@ namespace
     int g_prefill_right_lost_time = MT9V03X_H;
     float g_prefill_left_lost_ratio = 1.0f;
     float g_prefill_right_lost_ratio = 1.0f;
+    MonotonicEventTimer g_circle_state_event_timer;
+    MonotonicEventTimer g_circle_normal_exit_cooldown_timer;
 
     struct HuCarCompat
     {
@@ -792,6 +807,16 @@ namespace
     // };
 // 采样距离新距离 = 3.0 × (新 track_width_ipm / 旧 track_width_ipm)
     constexpr float k_ipm_sample_distance = 3.9f; 
+    // 红线近端人工锚点，只连接近端丢线后的第一个有效红线点。
+    constexpr float k_redline_front_anchor_x = 79.0f;
+    constexpr float k_redline_front_anchor_y = 119.0f;
+    constexpr float k_redline_front_anchor_max_gap = 36.0f;
+    // 只有圆环状态1~3允许边界丢线值进入 IPM 偏移；状态4~6 不再沿用该旧规则。
+    bool allow_lost_edge_offset_in_circle()
+    {
+        return island_state >= 1 && island_state <= 3 &&
+               (Image_Flag.Left_Circle || Image_Flag.Right_Circle);
+    }
     constexpr float k_ipm_break_distance = 18.0f;// 断线距离，超过这个距离认为两点不连续
     constexpr int k_ipm_midline_tangent_span = 2;// 计算中线切线的跨度，单位是点数
 
@@ -982,6 +1007,7 @@ namespace
             const uint16 next = i + k_ipm_midline_tangent_span;
             if (!is_ipm_span_continuous(edge_points, prev, next))
             {
+                // 这一小段无法计算可靠切线，跳过该点；后续有效 IPM 边线仍然继续偏移。
                 continue;
             }
 
@@ -1002,6 +1028,51 @@ namespace
             Ipm_Mid_Points[Ipm_Mid_Point_Count][0] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(mid_x)), 0, MT9V03X_W - 1));
             Ipm_Mid_Points[Ipm_Mid_Point_Count][1] = static_cast<uint16>(std::clamp<int>(static_cast<int>(std::lround(mid_y)), 0, MT9V03X_H - 1));
             Ipm_Mid_Point_Count++;
+        }
+
+        // 普通场景才使用车头锚点；圆环内保留原有的丢线边偏移逻辑。
+        const bool allow_lost_edge_offset = allow_lost_edge_offset_in_circle();
+        if (!allow_lost_edge_offset && Ipm_Mid_Point_Count > 0)
+        {
+            const float first_x = static_cast<float>(Ipm_Mid_Points[0][0]);
+            const float first_y = static_cast<float>(Ipm_Mid_Points[0][1]);
+            const float first_gap = std::hypot(first_x - k_redline_front_anchor_x,
+                                               first_y - k_redline_front_anchor_y);
+
+            if (first_y < k_redline_front_anchor_y - 1.0f &&
+                first_gap <= k_redline_front_anchor_max_gap)
+            {
+                const uint16 old_count = Ipm_Mid_Point_Count;
+                // 锚点到首个真实红点按约 3.9px 分段，避免单段超过蓝线 18px 断点阈值。
+                const uint16 bridge_segment_count = std::max<uint16>(
+                    1,
+                    static_cast<uint16>(std::ceil(first_gap / k_ipm_sample_distance)));
+                const uint16 prepend_count = std::min<uint16>(bridge_segment_count, MT9V03X_H);
+                const uint16 kept_old_count = std::min<uint16>(
+                    old_count,
+                    static_cast<uint16>(MT9V03X_H - prepend_count));
+
+                for (uint16 j = kept_old_count; j > 0; --j)
+                {
+                    Ipm_Mid_Points[prepend_count + j - 1][0] = Ipm_Mid_Points[j - 1][0];
+                    Ipm_Mid_Points[prepend_count + j - 1][1] = Ipm_Mid_Points[j - 1][1];
+                }
+
+                for (uint16 j = 0; j < prepend_count; ++j)
+                {
+                    const float t = static_cast<float>(j) /
+                                    static_cast<float>(bridge_segment_count);
+                    const float bridge_x = k_redline_front_anchor_x +
+                                           (first_x - k_redline_front_anchor_x) * t;
+                    const float bridge_y = k_redline_front_anchor_y +
+                                           (first_y - k_redline_front_anchor_y) * t;
+                    Ipm_Mid_Points[j][0] = static_cast<uint16>(std::clamp<int>(
+                        static_cast<int>(std::lround(bridge_x)), 0, MT9V03X_W - 1));
+                    Ipm_Mid_Points[j][1] = static_cast<uint16>(std::clamp<int>(
+                        static_cast<int>(std::lround(bridge_y)), 0, MT9V03X_H - 1));
+                }
+                Ipm_Mid_Point_Count = prepend_count + kept_old_count;
+            }
         }
     }
 
@@ -1089,7 +1160,16 @@ void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H], const uint8 right_
     {
         const int left = left_line[row];
         const int right = right_line[row];
-        if (left > Border_Min && left < Border_Max)
+        // 只有圆环状态1~3沿用旧规则；状态4~6和其他场景均过滤丢线哨兵值。
+        // 其他场景过滤左边 x=1/2，但保留 Cross_fill 后的有效补线。
+        const bool allow_lost_edge_offset = allow_lost_edge_offset_in_circle();
+        const bool left_control_valid = allow_lost_edge_offset
+                                            ? (left > Border_Min && left < Border_Max)
+                                            : (left > Border_Min + 1 && left < Border_Max);
+        const bool right_control_valid = allow_lost_edge_offset
+                                             ? (right > Border_Min && right < Border_Max)
+                                             : (right > Border_Min && right < Border_Max - 1);
+        if (left_control_valid)
         {
             int ipm_x = 0;
             int ipm_y = 0;
@@ -1108,7 +1188,7 @@ void transform_lines_to_ipm(const uint8 left_line[MT9V03X_H], const uint8 right_
                 }
             }
         }
-        if (right > Border_Min && right < Border_Max)
+        if (right_control_valid)
         {
             int ipm_x = 0;
             int ipm_y = 0;
@@ -3632,9 +3712,168 @@ bool short_col_point_is_fallback = false;
 int temp_RU[2];
 int temp_LU[2];
 
+namespace
+{
+    enum class CircleDirection : uint8_t
+    {
+        Left,
+        Right
+    };
+
+    const char *circle_state_event_name(uint8_t state)
+    {
+        switch (state)
+        {
+        case 1:
+            return "CircleEntryDetected";
+        case 2:
+            return "CircleWaitUpperArc";
+        case 3:
+            return "CircleFindArc";
+        case 4:
+            return "CircleExitTrend";
+        case 5:
+            return "CircleRepairExitLine";
+        case 6:
+            return "CircleRecoverTrack";
+        default:
+            return "CircleIdle";
+        }
+    }
+
+    MonotonicEventTimer::Duration circle_state_event_timeout(uint8_t state)
+    {
+        switch (state)
+        {
+        case 1:
+            return k_circle_state1_entry_detected_timeout;
+        case 2:
+            return k_circle_state2_wait_upper_arc_timeout;
+        case 3:
+            return k_circle_state3_find_arc_timeout;
+        case 4:
+            return k_circle_state4_exit_trend_timeout;
+        case 5:
+            return k_circle_state5_repair_exit_line_timeout;
+        case 6:
+            return k_circle_state6_recover_track_timeout;
+        default:
+            return MonotonicEventTimer::Duration::zero();
+        }
+    }
+
+    void clear_circle_runtime_data()
+    {
+        Image_Flag.Left_Circle = false;
+        Image_Flag.Right_Circle = false;
+        g_left_circle_entry_candidate_frames = 0;
+        g_right_circle_entry_candidate_frames = 0;
+        g_left_circle_state2_no_monotonicity_frames = 0;
+        g_right_circle_state2_no_monotonicity_frames = 0;
+        g_left_circle_exit_mono_row = 0;
+        g_left_circle_exit_mono_col = 0;
+        g_right_circle_exit_mono_row = 0;
+        g_right_circle_exit_mono_col = 0;
+        monotonicity_change_line[0] = 0;
+        monotonicity_change_line[1] = 0;
+        short_col_point[0] = 0;
+        short_col_point[1] = 0;
+        short_col_point_is_fallback = false;
+        shortest_White_Column1[0] = 0;
+        shortest_White_Column1[1] = 0;
+        temp_RU[0] = 0;
+        temp_RU[1] = 0;
+        temp_LU[0] = 0;
+        temp_LU[1] = 0;
+        reset_circle_integrate_yaw();
+    }
+
+    // 所有状态跳转统一经过此处，保证每个状态事件从进入时重新计时。
+    void set_circle_state(uint8_t new_state, MonotonicEventTimer::TimePoint now)
+    {
+        island_state = new_state;
+        if (new_state == 0)
+        {
+            g_circle_state_event_timer.reset();
+        }
+        else
+        {
+            g_circle_state_event_timer.start(now);
+        }
+    }
+
+    void start_circle(CircleDirection direction, MonotonicEventTimer::TimePoint now)
+    {
+        clear_circle_runtime_data();
+        Image_Flag.Left_Circle = direction == CircleDirection::Left;
+        Image_Flag.Right_Circle = direction == CircleDirection::Right;
+        set_circle_state(1, now);
+    }
+
+    // 用户规则：只有状态6正常恢复赛道后启动2秒再入环冷却。
+    void finish_circle_normally(MonotonicEventTimer::TimePoint now)
+    {
+        clear_circle_runtime_data();
+        set_circle_state(0, now);
+        g_circle_normal_exit_cooldown_timer.start(now);
+    }
+
+    void cancel_circle_on_timeout(MonotonicEventTimer::TimePoint now)
+    {
+        clear_circle_runtime_data();
+        set_circle_state(0, now);
+    }
+
+    bool circle_normal_exit_cooldown_active(MonotonicEventTimer::TimePoint now)
+    {
+        if (!g_circle_normal_exit_cooldown_timer.running())
+        {
+            return false;
+        }
+        if (g_circle_normal_exit_cooldown_timer.expired(k_circle_normal_exit_reentry_cooldown, now))
+        {
+            g_circle_normal_exit_cooldown_timer.reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool cancel_circle_if_state_event_timed_out(MonotonicEventTimer::TimePoint now)
+    {
+        if (island_state == 0)
+        {
+            return false;
+        }
+
+        // 兼容调试时外部直接修改 island_state 的情况，避免活动状态没有计时基准。
+        if (!g_circle_state_event_timer.running())
+        {
+            g_circle_state_event_timer.start(now);
+            return false;
+        }
+
+        const auto timeout = circle_state_event_timeout(island_state);
+        if (timeout == MonotonicEventTimer::Duration::zero() ||
+            !g_circle_state_event_timer.expired(timeout, now))
+        {
+            return false;
+        }
+
+        std::cout << circle_state_event_name(island_state) << " timeout, cancel circle" << std::endl;
+        cancel_circle_on_timeout(now);
+        return true;
+    }
+}
+
 // 圆环检测与补线状态机：根据拐点、丢线和 yaw 积分推进 island_state。
 void Island_Detect(void)//环岛检测
 {
+    const auto now = MonotonicEventTimer::Clock::now();
+    if (cancel_circle_if_state_event_timed_out(now))
+    {
+        return;
+    }
+
     uint16 i;
 
     uint16 start, end;
@@ -3657,72 +3896,61 @@ void Island_Detect(void)//环岛检测
     monotonicity_change_right_flag=Monotonicity_Change_Right(MT9V03X_H-1-10,10);
     monotonicity_change_left_flag=Monotonicity_Change_Left(MT9V03X_H-1-10,10);
 
-    if(Image_Flag.Cross_Fill==0&&island_state==0)//互斥
+    if(island_state==0)
     {
-        continuity_change_left_flag=Continuity_Change_Left(MT9V03X_H-10,15);//连续性判断
-        continuity_change_right_flag=Continuity_Change_Right(MT9V03X_H-10,15);
-        if(Image_Flag.Left_Circle==0)//左环
+        const bool cooldown_active = circle_normal_exit_cooldown_active(now);
+        if(Image_Flag.Cross_Fill!=0 || cooldown_active)
         {
-            if(monotonicity_change_right_flag==0&&//右边是单调的
+            g_left_circle_entry_candidate_frames = 0;
+            g_right_circle_entry_candidate_frames = 0;
+        }
+        else
+        {
+            bool left_entry_candidate = false;
+            bool right_entry_candidate = false;
+
+            if(Image_Flag.Left_Circle==0 &&
+                    monotonicity_change_right_flag==0&&//右边是单调的
                     continuity_change_left_flag!=0&&//左边是不连续的
                     continuity_change_right_flag==0&&//左环岛右边是连续的
                     Left_Lost_Time>=20&& //左边丢线很多
                     Left_Lost_Time<=70&& //也不能全丢了
-                    hightest<30//&&//搜索截止行看到很远
-              )
+                    hightest<30)//搜索截止行看到很远
             {
                 left_down_guai[0]=Find_Left_Down_Point(MT9V03X_H-1,20);//找左下角点
-                left_down_guai[1]=Left_Line[left_down_guai[0]];//得到对应的y
-                if(left_down_guai[0]>=5)//条件1很松，在这里判断拐点，位置不对，则是误判，跳出
-                {
-                    island_state=1;
-                    reset_circle_integrate_yaw();//开始记录yaw
-                    //清除最短白列，防止上一次圆环带来的信息影响状态三
-                    short_col_point[0]=0;
-                    short_col_point[1]=0;
-                    short_col_point_is_fallback=false;
-                    g_left_circle_state2_no_monotonicity_frames = 0;
-                    g_left_circle_exit_mono_row = 0;
-                    g_left_circle_exit_mono_col = 0;
-                    Image_Flag.Left_Circle=1;
-                }
-                else//误判，归零
-                {
-                    island_state=0;
-                    Image_Flag.Left_Circle=0;
-                }
+                left_down_guai[1]=Left_Line[left_down_guai[0]];
+                left_entry_candidate = left_down_guai[0]>=5;
             }
-        }
-        if(Image_Flag.Right_Circle==0)//右环
-        {
-            if(monotonicity_change_left_flag==0&&
-                    continuity_change_left_flag==0&&//右环岛左边是连续的
-                    continuity_change_right_flag!=1&&//右边是真实不连续行号，排除连续和大部分丢线异常
-                    Right_Lost_Time>=20&&           //右丢线多
-                    Right_Lost_Time<=70&&           //右丢线不能太多
 
-                    hightest<30//&&//搜索截止行看到很远
-              )
+            if(Image_Flag.Right_Circle==0 &&
+                    monotonicity_change_left_flag==0&&
+                    continuity_change_left_flag==0&&//右环岛左边是连续的
+                    continuity_change_right_flag!=1&&//右边是真实不连续行号，排除大部分丢线异常
+                    Right_Lost_Time>=20&&
+                    Right_Lost_Time<=70&&
+                    hightest<30)
             {
-                right_down_guai[0]=Find_Right_Down_Point(MT9V03X_H-1,20);//右下点
+                right_down_guai[0]=Find_Right_Down_Point(MT9V03X_H-1,20);//找右下角点
                 right_down_guai[1]=Right_Line[right_down_guai[0]];
-                if(right_down_guai[0]>=5)//条件1很松，在这里加判拐点，位置不对，则是误判，跳出
-                {
-                    island_state=1;
-                    reset_circle_integrate_yaw();
-                    short_col_point[0]=0;
-                    short_col_point[1]=0;
-                    short_col_point_is_fallback=false;
-                    g_right_circle_state2_no_monotonicity_frames = 0;
-                    g_right_circle_exit_mono_row = 0;
-                    g_right_circle_exit_mono_col = 0;
-                    Image_Flag.Right_Circle=1;
-                }
-                else
-                {
-                    island_state=0;
-                    Image_Flag.Right_Circle=0;
-                }
+                right_entry_candidate = right_down_guai[0]>=5;
+            }
+
+            // 任一入口条件中断都立即清零，只接受同一方向连续3帧。
+            g_left_circle_entry_candidate_frames = left_entry_candidate
+                ? std::min(g_left_circle_entry_candidate_frames + 1, k_circle_entry_confirm_frames)
+                : 0;
+            g_right_circle_entry_candidate_frames = right_entry_candidate
+                ? std::min(g_right_circle_entry_candidate_frames + 1, k_circle_entry_confirm_frames)
+                : 0;
+
+            // 左右入环在同一帧互斥，一方确认后不再让另一方覆盖状态。
+            if(g_left_circle_entry_candidate_frames >= k_circle_entry_confirm_frames)
+            {
+                start_circle(CircleDirection::Left, now);
+            }
+            else if(g_right_circle_entry_candidate_frames >= k_circle_entry_confirm_frames)
+            {
+                start_circle(CircleDirection::Right, now);
             }
         }
     }
@@ -3742,7 +3970,7 @@ void Island_Detect(void)//环岛检测
             }
             else if(L_D_corner_flag==0&&continuity_change_left_flag-monotonicity_change_left_flag>5)
             {
-                island_state=2;
+                set_circle_state(2, now);
             }
         }
         else if(island_state==2) //2状态下方丢线，上方即将出现大弧线
@@ -3762,7 +3990,7 @@ void Island_Detect(void)//环岛检测
                 short_col_point[0] = limit_a_b(k_circle_short_col_fallback_y, 5, MT9V03X_H - 5);
                 short_col_point[1] = limit_a_b(k_left_circle_short_col_fallback_x, Border_Min, Border_Max);
                 short_col_point_is_fallback = true;
-                island_state=3;
+                set_circle_state(3, now);
             }
             else
             {
@@ -3773,7 +4001,7 @@ void Island_Detect(void)//环岛检测
                     short_col_point[0] = limit_a_b(k_circle_short_col_fallback_y, 5, MT9V03X_H - 5);
                     short_col_point[1] = limit_a_b(k_left_circle_short_col_fallback_x, Border_Min, Border_Max);
                     short_col_point_is_fallback = true;
-                    island_state=3;
+                    set_circle_state(3, now);
                 }
             }
         }
@@ -3807,7 +4035,7 @@ void Island_Detect(void)//环岛检测
             //if (car.circle_intergrate_yaw < -40 || shortest_White_Column1[0] < 30)
             if (car.circle_intergrate_yaw < -50)
             {
-                island_state = 4;
+                set_circle_state(4, now);
             }
         }
         else if(island_state == 4)
@@ -3815,7 +4043,7 @@ void Island_Detect(void)//环岛检测
             const int right_mono = Monotonicity_Change_Right(MT9V03X_H - 5, 25);
             if(car.circle_intergrate_yaw <= -360)
             {
-                island_state=6;
+                set_circle_state(6, now);
             }
             else if(car.circle_intergrate_yaw < -250 &&
                     (R_D_corner_flag == 1 || (right_mono > 25 && right_mono <= 60)))
@@ -3830,7 +4058,7 @@ void Island_Detect(void)//环岛检测
                     g_left_circle_exit_mono_row = 0;
                     g_left_circle_exit_mono_col = 0;
                 }
-                island_state=5;
+                set_circle_state(5, now);
             }
         }
         else if(island_state == 5)
@@ -3864,7 +4092,7 @@ void Island_Detect(void)//环岛检测
             }
             if(L_U_corner_flag == 1||abs(car.circle_intergrate_yaw) < 30)
             {
-                island_state = 6;
+                set_circle_state(6, now);
             }
         }
         else if(island_state == 6)
@@ -3892,11 +4120,7 @@ void Island_Detect(void)//环岛检测
 
             if(Right_Lost_Time<20||Left_Lost_Time<20)
             {
-                island_state=0;
-                Image_Flag.Left_Circle =0;
-                g_left_circle_state2_no_monotonicity_frames = 0;
-                g_left_circle_exit_mono_row = 0;
-                g_left_circle_exit_mono_col = 0;
+                finish_circle_normally(now);
             }
         }
     }
@@ -3923,7 +4147,7 @@ void Island_Detect(void)//环岛检测
             }
             else if(R_D_corner_flag==0&&continuity_change_right_flag-monotonicity_change_right_flag> 5)
             {
-                island_state=2;
+                set_circle_state(2, now);
             }
         }
         else if(island_state==2) //2状态下方丢线，上方即将出现大弧线
@@ -3941,7 +4165,7 @@ void Island_Detect(void)//环岛检测
                 short_col_point[0] = limit_a_b(k_circle_short_col_fallback_y, 5, MT9V03X_H - 5);
                 short_col_point[1] = limit_a_b(k_right_circle_short_col_fallback_x, Border_Min, Border_Max);
                 short_col_point_is_fallback = true;
-                island_state=3;
+                set_circle_state(3, now);
             }
             else
             {
@@ -3952,7 +4176,7 @@ void Island_Detect(void)//环岛检测
                     short_col_point[0] = limit_a_b(k_circle_short_col_fallback_y, 5, MT9V03X_H - 5);
                     short_col_point[1] = limit_a_b(k_right_circle_short_col_fallback_x, Border_Min, Border_Max);
                     short_col_point_is_fallback = true;
-                    island_state=3;
+                    set_circle_state(3, now);
                 }
             }
         }
@@ -3994,7 +4218,7 @@ void Island_Detect(void)//环岛检测
             //if(car.circle_intergrate_yaw > 40 || shortest_White_Column1[0] < 30)
             if (car.circle_intergrate_yaw > 50)
             {
-                island_state=4;
+                set_circle_state(4, now);
             }
         }
         else if(island_state == 4)
@@ -4002,7 +4226,7 @@ void Island_Detect(void)//环岛检测
             const int left_mono = Monotonicity_Change_Left(MT9V03X_H - 5, 25);
             if(car.circle_intergrate_yaw >= 360)
             {
-                island_state=6;
+                set_circle_state(6, now);
             }
             else if(car.circle_intergrate_yaw >250 &&
                     (L_D_corner_flag == 1 || (left_mono > 25 && left_mono <= 60)))
@@ -4017,7 +4241,7 @@ void Island_Detect(void)//环岛检测
                     g_right_circle_exit_mono_row = 0;
                     g_right_circle_exit_mono_col = 0;
                 }
-                island_state=5;
+                set_circle_state(5, now);
             }
         }
         else if(island_state == 5)
@@ -4051,7 +4275,7 @@ void Island_Detect(void)//环岛检测
             }
             if(R_U_corner_flag == 1 || abs(car.circle_intergrate_yaw) < 30)
             {
-                island_state = 6;
+                set_circle_state(6, now);
             }
 
         }
@@ -4090,12 +4314,7 @@ void Island_Detect(void)//环岛检测
 //            if(continuity_change_right_flag == 0&&continuity_change_left_flag ==0)
             if(Right_Lost_Time<20||Left_Lost_Time<20)
             {
-
-                island_state=0;
-                Image_Flag.Right_Circle =0;
-                g_right_circle_state2_no_monotonicity_frames = 0;
-                g_right_circle_exit_mono_row = 0;
-                g_right_circle_exit_mono_col = 0;
+                finish_circle_normally(now);
             }
 
         }

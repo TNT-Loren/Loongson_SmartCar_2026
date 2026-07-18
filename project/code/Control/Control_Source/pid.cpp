@@ -1,8 +1,11 @@
 #include "pid.hpp"
 #include <cmath> // 用于 std::abs
 
+// IncrementalPID pid_left(0.8f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
+// IncrementalPID pid_right(0.8f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
 IncrementalPID pid_left(0.74f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
 IncrementalPID pid_right(0.74f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
+// PositionalPID pid_angle(6.0f, 0.0f, 0.14f, 100.0f, 30.0f);
 PositionalPID pid_angle(5.2f, 0.0f, 0.12f, 100.0f, 30.0f);
 
 /*v

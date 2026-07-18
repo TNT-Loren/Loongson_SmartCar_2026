@@ -24,7 +24,7 @@ namespace
 {
 constexpr float k_ipm_control_sample_distance = 3.0f;
 constexpr float k_ipm_control_break_distance = 18.0f;
-constexpr uint16 k_ipm_control_max_points = 25;
+constexpr uint16 k_ipm_control_max_points = 35;//蓝色ipm中线
 // IPM 控制坐标系下的车身参考点：pure pursuit 的所有角度都从这里指向预瞄点。
 constexpr float k_vehicle_x = 79.0f;
 constexpr float k_vehicle_y = 138.0f;
@@ -70,7 +70,7 @@ LegacyPreviewYawParam get_legacy_preview_yaw_param(TrackScene scene)
     }
     if (scene == TrackScene::SharpCurve)
     {
-        return {27.0f, 17.0f, 35.0f};
+        return {27.0f, 17.0f, 40.0f};
     }
     if (scene == TrackScene::ObstacleAvoid)
     {
@@ -78,7 +78,7 @@ LegacyPreviewYawParam get_legacy_preview_yaw_param(TrackScene scene)
     }
     if (scene == TrackScene::GentleCurve)
     {
-        return {21.0f, 15.0f, 28.0f};
+        return {21.0f, 15.0f, 30.0f};
     }
     return {17.0f, 10.0f, 22.0f};
 }
@@ -88,7 +88,7 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
     // 预瞄距离按场景固定给初值。急弯/环内刻意短一些，避免远端外推线过早主导转向。
     if (scene == TrackScene::LostLine)
     {
-        return {47.0f, 35.0f};
+        return {47.0f, 20.0f};
     }
     if (scene == TrackScene::ObstacleAvoid)
     {
@@ -107,13 +107,13 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
 
     if (scene == TrackScene::SharpCurve)
     {
-        return {40.0f, 35.0f};
+        return {40.0f, 45.0f};//35
     }
     if (scene == TrackScene::GentleCurve)
     {
-        return {44.0f, 35.0f};
+        return {44.0f, 40.0f};
     }
-    return {44.2f, 35.0f};
+    return {47.2f, 35.0f};
 }
 
 float point_distance(float x1, float y1, float x2, float y2)
@@ -459,6 +459,76 @@ float calc_legacy_preview_delta_yaw(TrackScene scene)
     return std::clamp(delta_yaw, -param.max_delta_yaw, param.max_delta_yaw);
 }
 
+// 以车身参考点为圆心，沿蓝线顺序选择预矄圆的第一个前向交点。
+// 这里只改变预矄点选择，不改变后级角度 PID 和左右轮速计算。
+bool find_spatial_preview_target(const uint16 points[MT9V03X_H][2],
+                                 uint16 count,
+                                 float lookahead_distance,
+                                 float &target_x,
+                                 float &target_y)
+{
+    if (count == 0 || lookahead_distance <= 1e-3f)
+    {
+        return false;
+    }
+
+    float ax = k_vehicle_x;
+    float ay = k_vehicle_y;
+    const float radius_squared = lookahead_distance * lookahead_distance;
+
+    for (uint16 i = 0; i < count; ++i)
+    {
+        const float bx = static_cast<float>(points[i][0]);
+        const float by = static_cast<float>(points[i][1]);
+        const float dx = bx - ax;
+        const float dy = by - ay;
+        const float segment_squared = dx * dx + dy * dy;
+
+        if (segment_squared > 1e-6f)
+        {
+            const float fx = ax - k_vehicle_x;
+            const float fy = ay - k_vehicle_y;
+            const float b = 2.0f * (fx * dx + fy * dy);
+            const float c = fx * fx + fy * fy - radius_squared;
+            const float discriminant = b * b - 4.0f * segment_squared * c;
+
+            if (discriminant >= 0.0f)
+            {
+                const float sqrt_discriminant = std::sqrt(discriminant);
+                const float denominator = 2.0f * segment_squared;
+                const float roots[2] = {
+                    (-b - sqrt_discriminant) / denominator,
+                    (-b + sqrt_discriminant) / denominator};
+
+                for (float t : roots)
+                {
+                    if (t <= 1e-4f || t > 1.0f + 1e-4f)
+                    {
+                        continue;
+                    }
+
+                    const float candidate_x = ax + dx * t;
+                    const float candidate_y = ay + dy * t;
+                    // 只接受车身前方的交点，避免折线回头时选到身后分支。
+                    if (candidate_y > k_vehicle_y + 1.0f)
+                    {
+                        continue;
+                    }
+
+                    target_x = candidate_x;
+                    target_y = candidate_y;
+                    return true;
+                }
+            }
+        }
+
+        ax = bx;
+        ay = by;
+    }
+
+    return false;
+}
+
 bool calc_preview_target_yaw_from_points(const uint16 mid_points[MT9V03X_H][2],
                                          uint16 mid_count,
                                          TrackScene scene,
@@ -483,14 +553,27 @@ bool calc_preview_target_yaw_from_points(const uint16 mid_points[MT9V03X_H][2],
 
     const PurePursuitParam param = get_pure_pursuit_param(scene);
     // 当前点距固定为 3px，所以可以把预瞄距离直接换成目标点索引。
-    uint16 target_idx = static_cast<uint16>(
-        std::lround(param.lookahead_dist / k_ipm_control_sample_distance));
-    target_idx = std::clamp<uint16>(target_idx, 1, extended_count - 1);
+    float target_x = 0.0f;
+    float target_y = 0.0f;
+    const bool spatial_target_valid = find_spatial_preview_target(extended_points,
+                                                                  extended_count,
+                                                                  param.lookahead_dist,
+                                                                  target_x,
+                                                                  target_y);
+    if (!spatial_target_valid)
+    {
+        // 蓝线不足以与预矄圆相交时，保留原有的累距索引作保底。
+        uint16 target_idx = static_cast<uint16>(
+            std::lround(param.lookahead_dist / k_ipm_control_sample_distance));
+        target_idx = std::clamp<uint16>(target_idx, 1, extended_count - 1);
+        target_x = static_cast<float>(extended_points[target_idx][0]);
+        target_y = static_cast<float>(extended_points[target_idx][1]);
+    }
 
-    const float target_x = static_cast<float>(extended_points[target_idx][0]);
-    const float target_y = static_cast<float>(extended_points[target_idx][1]);
-    preview_target[0] = extended_points[target_idx][0];
-    preview_target[1] = extended_points[target_idx][1];
+    preview_target[0] = static_cast<uint16>(std::clamp<int>(
+        static_cast<int>(std::lround(target_x)), 0, MT9V03X_W - 1));
+    preview_target[1] = static_cast<uint16>(std::clamp<int>(
+        static_cast<int>(std::lround(target_y)), 0, MT9V03X_H - 1));
     const float dx = target_x - k_vehicle_x;
     const float dy = k_vehicle_y - target_y;
     if (std::fabs(dx) < 1e-3f && std::fabs(dy) < 1e-3f)

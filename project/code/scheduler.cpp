@@ -10,9 +10,10 @@
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
 extern TrackInfo g_track_info;
-
+// false ture
 namespace
 {
+constexpr bool k_use_menu_start_gate = false;//是否用菜单
 constexpr bool k_speed_pid_tuning_mode = false;
 constexpr bool k_angle_pid_tuning_mode = false;
 constexpr float k_speed_tuning_target_max = 250.0f;
@@ -41,6 +42,32 @@ float target_speed = 0.0f;
 float target_yaw = 0.0f;
 float pwm_l = 0.0f;
 float pwm_r = 0.0f;
+
+namespace
+{
+std::atomic<float> g_telemetry_left_speed{0.0f};
+std::atomic<float> g_telemetry_right_speed{0.0f};
+std::atomic<float> g_telemetry_left_pwm{0.0f};
+std::atomic<float> g_telemetry_right_pwm{0.0f};
+
+void publish_wheel_control_telemetry()
+{
+    g_telemetry_left_speed.store(speed1, std::memory_order_relaxed);
+    g_telemetry_right_speed.store(speed2, std::memory_order_relaxed);
+    g_telemetry_left_pwm.store(pwm_l, std::memory_order_relaxed);
+    g_telemetry_right_pwm.store(pwm_r, std::memory_order_relaxed);
+}
+}
+
+WheelControlTelemetry wheel_control_telemetry_snapshot()
+{
+    WheelControlTelemetry telemetry;
+    telemetry.left_speed = g_telemetry_left_speed.load(std::memory_order_relaxed);
+    telemetry.right_speed = g_telemetry_right_speed.load(std::memory_order_relaxed);
+    telemetry.left_pwm = g_telemetry_left_pwm.load(std::memory_order_relaxed);
+    telemetry.right_pwm = g_telemetry_right_pwm.load(std::memory_order_relaxed);
+    return telemetry;
+}
 
 //====================================================================================================================
 void master_scheduler_callback()
@@ -82,21 +109,26 @@ void master_scheduler_callback()
         float control_dt = dt_sum_10ms;
         dt_sum_10ms = 0.0f;
 
-        // 发车安全门优先级最高。STOP 时持续清空全部闭环状态，禁止残留积分和 PWM。
-        if (!Menu_Car_Enabled())
+        // 发车安全门优先级最高。STOP 时持续清空全部闭环状态，禁止残留积分和 PWM。、
+        if (k_use_menu_start_gate && !Menu_Car_Enabled())
         {
-            target_speed = 0.0f;
-            target_yaw = yaw;
-            pwm_l = 0.0f;
-            pwm_r = 0.0f;
-            base_start_speed = 0.0f;
+            if (!Menu_Car_Enabled())
+            {
+                target_speed = 0.0f;
+                target_yaw = yaw;
+                pwm_l = 0.0f;
+                pwm_r = 0.0f;
+                base_start_speed = 0.0f;
 
-            pid_left.clear();
-            pid_right.clear();
-            pid_angle.clear();
-            motor_set_speed(0, 0);
-            return;
+                pid_left.clear();
+                pid_right.clear();
+                pid_angle.clear();
+                motor_set_speed(0, 0);
+                publish_wheel_control_telemetry();
+                return;
+            }
         }
+
 
         // 三种模式最终都只发布左右轮目标速度，后面的速度内环保持完全一致。
         float target_speed_l = 0.0f;
@@ -160,7 +192,7 @@ void master_scheduler_callback()
             target_speed = base_speed;
             target_yaw = local_vision_target_yaw;
             // 正式模式按基础速度动态限制转向权限，避免低速/弯道时差速过度。
-            constexpr float k_max_steer_ratio = 0.67f;
+            constexpr float k_max_steer_ratio = 0.60f;
             const float steer_limit = base_speed * k_max_steer_ratio;
             const float steer = pid_angle.calc(local_vision_target_yaw, yaw, control_dt, steer_limit);
             // 比赛模式不允许内轮倒转；正 steer 表示左轮加速、右轮减速，车辆向右转。
@@ -174,6 +206,7 @@ void master_scheduler_callback()
         pwm_l = std::clamp(pwm_l, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         pwm_r = std::clamp(pwm_r, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         motor_set_speed((int)pwm_l, (int)pwm_r);
+        publish_wheel_control_telemetry();
     }
 
     // 约 1 秒发布一次低频状态标志；tick 不清零，保持调度时间轴连续。

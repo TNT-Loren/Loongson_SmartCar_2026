@@ -21,12 +21,8 @@ static bool g_keyboard_ready = false;
 void keyboard_init_simple();
 void keyboard_restore_simple();
 void keyboard_poll_simple();
-// 测试  3.25
-/*
-    速度是160的时候已经很快了0.72 0.16    0.6   0.2
-    角度环：3.5 0.3    0.2
-*/
-//int test=80;
+
+
 float test1, test2, test3, test4;
 int key_mode = 0;
 
@@ -79,7 +75,7 @@ int main(int, char **)
      Encoder_Init();
      Beep_Init();
      motor_init();
-     Menu_Init();
+   //  Menu_Init();
         // if (tcp_debug_init("192.168.31.20", 8086))
         // {
         //    //tcp_bind_variables(&target_yaw, &yaw);
@@ -130,10 +126,11 @@ int main(int, char **)
 
     while (1)
     {
-       Menu_Task();
+        // Menu_Task();
         //Set_Beeptime(5000);      // 响 500ms
         keyboard_poll_simple(); // 轮询键盘输入，供调试用
                                 // esc_set_speed_percent(test1);
+         //esc_set_speed_percent(20);
         fps_timer_start();
         if (image_test())
         {
@@ -194,7 +191,13 @@ int main(int, char **)
             //     std::cout << static_cast<int>(Mid_Line[i]) << " ,";
             // }
             // std::cout << "  " << std::endl;
-            std::cout << "fps: " << g_fps_value << std::endl;
+            const WheelControlTelemetry wheel = wheel_control_telemetry_snapshot();
+            std::cout << "fps: " << g_fps_value
+                      << "  speed_l: " << wheel.left_speed
+                      << "  speed_r: " << wheel.right_speed
+                      << "  pwm_l: " << wheel.left_pwm
+                      << "  pwm_r: " << wheel.right_pwm
+                      << std::endl;
 
             // if (g_vs_ready)
             // {
@@ -267,6 +270,7 @@ void sigint_handler(int signum)
     printf("收到Ctrl+C,程序即将退出\n");
     Beep(Off);
     motor_stop();
+    esc_set_speed_percent(0);
     exit(0);
 }
 
@@ -280,6 +284,7 @@ void cleanup()
     printf("程序异常退出，执行清理操作\n");
     Beep(Off);
     motor_stop();
+    esc_set_speed_percent(0);
 }
 
 //================================================================// 键盘输入相关的函数实现
