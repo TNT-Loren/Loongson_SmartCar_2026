@@ -59,16 +59,16 @@
 // #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
 // 激进模型1，速度未对比，测试的时候效果比第1次的好
-// #define VS_MODEL_PARAM_PATH        "falsh_tiny_classifier_fp32.ncnn.param"
-// #define VS_MODEL_BIN_PATH          "falsh_tiny_classifier_fp32.ncnn.bin"
-// #define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
-// #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
+#define VS_MODEL_PARAM_PATH        "falsh_tiny_classifier_fp32.ncnn.param"
+#define VS_MODEL_BIN_PATH          "falsh_tiny_classifier_fp32.ncnn.bin"
+#define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
+#define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
 // 激进模型2，速度未对比，测试的时候效果比第2次的好
-#define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
-#define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
-#define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
-#define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
+// #define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
+// #define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
+// #define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
+// #define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
 
 // ===================================================================
 // VSConfig：运行时配置镜像。默认值全部来自上方宏，通常只改“VS 调参区”。

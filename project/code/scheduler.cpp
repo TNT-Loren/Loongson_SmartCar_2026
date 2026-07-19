@@ -77,6 +77,9 @@ void master_scheduler_callback()
     float dt = std::chrono::duration<float>(now - last_time).count();
     last_time = now;
 
+    // 绕行使用单调事件计时，即使本次控制周期异常也要先处理到期恢复。
+    obstacle_avoid_timer_task();
+
     // 极短周期没有有效采样意义，直接忽略且不推进控制时间轴。
     if (dt <= 0.0001f)
         return;
@@ -97,8 +100,6 @@ void master_scheduler_callback()
     encoder_update_task(dt);
     imu_update_task(dt);
     Beep_Task_5ms();
-    // 绕行倒计时挂在 5ms 主节拍上，持续时间在 image_test.cpp 中统一配置。
-    obstacle_avoid_5ms_task();
 
     tick_5ms++; // 仅正常周期推进逻辑节拍，异常周期不会扰乱 10 ms 分频。
 

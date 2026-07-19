@@ -93,11 +93,11 @@ int main(int, char **)
         return -1; // 摄像头初始化失败，直接退出程序
     }
     // VS/NCNN 初始化
-    //  g_vs_ready = g_vs.init_smartcar_defaults(&uvc_dev);
-    //  if (!g_vs_ready)
-    //  {
-    //      printf("vs init failed, AI/图传降级跳过\r\n");
-    //  }
+     g_vs_ready = g_vs.init_smartcar_defaults(&uvc_dev);
+     if (!g_vs_ready)
+     {
+         printf("vs init failed, AI/图传降级跳过\r\n");
+     }
     //  ===== VS添加结束 =====
 
     atexit(cleanup);
@@ -142,31 +142,31 @@ int main(int, char **)
         }
         fps_timer_end();
         // ===== VS添加：AI视觉推理 — 复用巡线已抓帧，彩色给AI，不额外等帧 =====
-        // if (g_vs_ready)
-        // {
-        //     cv::Mat color_frame = uvc_dev.get_frame_mjpg();
-        //     if (!g_vs.tick_bgr(color_frame))
-        //     {
-        //         printf("vs.tick error\r\n");
-        //     }
-        //     else
-        //     {
-        //         tcp_camera_update_vs_image();
-        //     }
-        //     if (g_vs.consume_new_result(result))
-        //     {
-        //         // AI结果映射绕行：武器→左绕  物资→右绕  载具→直行压过
-        //         if (result == "武器")
-        //         {
-        //             trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
-        //         }
-        //         else if (result == "物资")
-        //         {
-        //             trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
-        //         }
-        //         // 载具/交通工具 → 直行，不触发绕行
-        //     }
-        // }
+        if (g_vs_ready)
+        {
+            cv::Mat color_frame = uvc_dev.get_frame_mjpg();
+            if (!g_vs.tick_bgr(color_frame))
+            {
+                printf("vs.tick error\r\n");
+            }
+            else
+            {
+                tcp_camera_update_vs_image();
+            }
+            if (g_vs.consume_new_result(result))
+            {
+                // AI结果映射绕行：武器→左绕  物资→右绕  载具→直行压过
+                if (result == "武器")
+                {
+                    trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
+                }
+                else if (result == "物资")
+                {
+                    trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
+                }
+                // 载具/交通工具 → 直行，不触发绕行
+            }
+        }
         // ===== VS添加结束 =====
         if (need_print.load() == 1)
         {

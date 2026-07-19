@@ -220,16 +220,15 @@ int Both_Lost_Time = 0;//两边同时丢线数
 int point_mode =0; //0突变找点 1向量法找点
 TestMidlineMode g_test_midline_mode = TestMidlineMode::Auto;
 ReliableEdgeMode g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
-std::atomic<ObstacleAvoidDirection> g_obstacle_avoid_direction{ObstacleAvoidDirection::None};
+namespace
+{
+std::mutex g_obstacle_avoid_mutex;
+ObstacleAvoidDirection g_obstacle_avoid_direction = ObstacleAvoidDirection::None;
+MonotonicEventTimer g_obstacle_avoid_timer;
+// 更改绕行时间时只需调整此处。
+constexpr auto k_obstacle_avoid_duration = std::chrono::milliseconds(2000);//绕行时间
+}
 
-//更改绕行时间
-constexpr uint16_t k_obstacle_avoid_task_period_ms = 5;// 3.0 秒，600 tick
-constexpr uint16_t k_obstacle_avoid_duration_ms = 2000;// 2.0 秒，400 tick // 2.5 秒，500 tick
-static_assert(k_obstacle_avoid_duration_ms % k_obstacle_avoid_task_period_ms == 0,
-                  "Obstacle avoid duration must be an integer number of scheduler ticks");
-constexpr uint16_t k_obstacle_avoid_duration_ticks =
-    k_obstacle_avoid_duration_ms / k_obstacle_avoid_task_period_ms;
-std::atomic<uint16_t> g_obstacle_avoid_ticks_left{0};
 uint8 My_Offine=0;
 
 uint16 points_l[(uint16)USE_num][2] = { {  0 } };//左线
@@ -356,39 +355,38 @@ void trigger_obstacle_avoid(ObstacleAvoidDirection direction)
     }
 
     // 当前试车方案：直接把选中的边线当临时中线使用，持续时间由
-    // k_obstacle_avoid_duration_ms 统一配置。
-    // 如果实车贴边太狠，只需要把 0.0f 改成一个小正数，例如 6~10px。
-    g_obstacle_avoid_direction.store(direction);
-    g_obstacle_avoid_ticks_left.store(k_obstacle_avoid_duration_ticks);
+    // k_obstacle_avoid_duration 统一配置。重复触发会从当前时刻重新计时。
+    // 绕行偏移当前为 -5.0 px，需结合实车轨迹继续标定。
+    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
+    g_obstacle_avoid_timer.start();
+    g_obstacle_avoid_direction = direction;
     g_ipm_midline_offset_px.store(-5.0f);
 }
 
-void obstacle_avoid_5ms_task(void)
+void obstacle_avoid_timer_task(void)
 {
-    uint16_t ticks_left = g_obstacle_avoid_ticks_left.load();
-    if (ticks_left == 0)
+    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
+    if (!g_obstacle_avoid_timer.expired(k_obstacle_avoid_duration))
     {
         return;
     }
 
-    ticks_left--;
-    g_obstacle_avoid_ticks_left.store(ticks_left);
-    if (ticks_left == 0)
-    {
-        // 到期后只恢复选择策略和偏移量，不直接改任何中线点集。
-        g_obstacle_avoid_direction.store(ObstacleAvoidDirection::None);
-        g_ipm_midline_offset_px.store(k_ipm_default_midline_offset_px);
-    }
+    // 到期后只恢复选择策略和偏移量，不直接改任何中线点集。
+    g_obstacle_avoid_timer.reset();
+    g_obstacle_avoid_direction = ObstacleAvoidDirection::None;
+    g_ipm_midline_offset_px.store(k_ipm_default_midline_offset_px);
 }
 
 bool obstacle_avoid_active(void)
 {
-    return g_obstacle_avoid_direction.load() != ObstacleAvoidDirection::None;
+    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
+    return g_obstacle_avoid_direction != ObstacleAvoidDirection::None;
 }
 
 ObstacleAvoidDirection current_obstacle_avoid_direction(void)
 {
-    return g_obstacle_avoid_direction.load();
+    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
+    return g_obstacle_avoid_direction;
 }
 
 const char *obstacle_avoid_direction_name(ObstacleAvoidDirection direction)
