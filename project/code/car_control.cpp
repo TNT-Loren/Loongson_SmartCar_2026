@@ -30,6 +30,10 @@ constexpr float k_vehicle_x = 79.0f;
 constexpr float k_vehicle_y = 138.0f;
 constexpr float k_pi = 3.14159265358979323846f;
 constexpr uint16 k_control_work_capacity = MT9V03X_H + 2;
+// 绕行试验开关：true 时直接使用对应 IPM 边线的最大 y 点，false 回退原绕行预矄方案。
+constexpr bool k_obstacle_avoid_use_edge_endpoint_preview = true;
+// 绕行目标向车体前方的车长补偿，单位为 IPM 像素；坐标 y 减小表示向前移动。
+constexpr float k_obstacle_avoid_vehicle_length_px = 15.0f;
 
 struct LegacyPreviewYawParam
 {
@@ -93,7 +97,7 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
     if (scene == TrackScene::ObstacleAvoid)
     {
         // Obstacle avoidance can be tuned without affecting normal sharp curves.
-        return {20.0f, 70.0f};
+        return {35.0f, 90.0f};
     }
     if (scene == TrackScene::Circle)
     {
@@ -114,6 +118,56 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
         return {44.0f, 40.0f};
     }
     return {47.2f, 35.0f};
+}
+
+bool find_obstacle_edge_endpoint_preview(ObstacleAvoidDirection direction,
+                                         float &target_x,
+                                         float &target_y)
+{
+    const uint16 (*edge_points)[2] = nullptr;
+    uint16 edge_count = 0;
+    if (direction == ObstacleAvoidDirection::Left)
+    {
+        edge_points = Ipm_Left_Points;
+        edge_count = Ipm_Left_Point_Count;
+    }
+    else if (direction == ObstacleAvoidDirection::Right)
+    {
+        edge_points = Ipm_Right_Points;
+        edge_count = Ipm_Right_Point_Count;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (edge_count == 0)
+    {
+        return false;
+    }
+
+    uint16 best_index = 0;
+    for (uint16 i = 1; i < edge_count; ++i)
+    {
+        if (edge_points[i][1] > edge_points[best_index][1])
+        {
+            best_index = i;
+        }
+    }
+
+    const float candidate_x = static_cast<float>(edge_points[best_index][0]);
+    const float candidate_y = static_cast<float>(edge_points[best_index][1]) +
+                              k_obstacle_avoid_vehicle_length_px;
+    if (candidate_x < 0.0f || candidate_x >= static_cast<float>(MT9V03X_W) ||
+        candidate_y < 0.0f || candidate_y >= static_cast<float>(MT9V03X_H) ||
+        candidate_y >= k_vehicle_y)
+    {
+        return false;
+    }
+
+    target_x = candidate_x;
+    target_y = candidate_y;
+    return true;
 }
 
 float point_distance(float x1, float y1, float x2, float y2)
@@ -537,11 +591,25 @@ bool calc_preview_target_yaw_from_points(const uint16 mid_points[MT9V03X_H][2],
                                          uint16 preview_target[2])
 {
     // 新控制主路径：IPM 中线点集 -> 控制侧补全/外推 -> 按预瞄距离取 target -> atan2 得到角度误差。
+    const PurePursuitParam param = get_pure_pursuit_param(scene);
+    // 当前点距固定为 3px，所以可以把预瞄距离直接换成目标点索引。
+    float target_x = 0.0f;
+    float target_y = 0.0f;
+    bool spatial_target_valid = false;
+    if (scene == TrackScene::ObstacleAvoid &&
+        k_obstacle_avoid_use_edge_endpoint_preview)
+    {
+        // 绕行试验方案：直接用对应 IPM 边线的最大 y 点作目标，不使用中线偏移。
+        spatial_target_valid = find_obstacle_edge_endpoint_preview(
+            current_obstacle_avoid_direction(), target_x, target_y);
+    }
+
     uint16 extended_points[MT9V03X_H][2] = {{0}};
     uint16 extended_count = 0;
     int16 line_x_by_y[MT9V03X_H] = {0};
     int16 raw_last_valid_y = -1;
-    if (!extend_ipm_midline(mid_points,
+    if (!spatial_target_valid &&
+        !extend_ipm_midline(mid_points,
                             mid_count,
                             extended_points,
                             extended_count,
@@ -551,15 +619,14 @@ bool calc_preview_target_yaw_from_points(const uint16 mid_points[MT9V03X_H][2],
         return false;
     }
 
-    const PurePursuitParam param = get_pure_pursuit_param(scene);
-    // 当前点距固定为 3px，所以可以把预瞄距离直接换成目标点索引。
-    float target_x = 0.0f;
-    float target_y = 0.0f;
-    const bool spatial_target_valid = find_spatial_preview_target(extended_points,
-                                                                  extended_count,
-                                                                  param.lookahead_dist,
-                                                                  target_x,
-                                                                  target_y);
+    if (!spatial_target_valid)
+    {
+        spatial_target_valid = find_spatial_preview_target(extended_points,
+                                                           extended_count,
+                                                           param.lookahead_dist,
+                                                           target_x,
+                                                           target_y);
+    }
     if (!spatial_target_valid)
     {
         // 蓝线不足以与预矄圆相交时，保留原有的累距索引作保底。

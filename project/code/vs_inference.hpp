@@ -35,9 +35,9 @@
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
 #define VS_CX_MIN (60)      // 底部中心X下限
 #define VS_CX_MAX (260)     // 底部中心X上限
-#define VS_BY_MIN (70)      // 底部中心Y下限；也是权重LUT归一化起点
-#define VS_BY_MAX (110)     // LUT归一化终点；超过后继续使用最大权重
-#define VS_FINALIZE_Y (116) // 提前结算线
+#define VS_BY_MIN (60)      // 底部中心Y下限；也是权重LUT归一化起点
+#define VS_BY_MAX (90)     // LUT归一化终点；超过后继续使用最大权重
+#define VS_FINALIZE_Y (106) // 提前结算线
 
 // HSV 红色双区间阈值：OpenCV HSV中红色跨 0/179，需要两段合并。
 #define VS_HSV1_LOW 0, 150, 100

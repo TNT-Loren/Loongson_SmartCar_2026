@@ -1,6 +1,7 @@
 #include "image_test.hpp"
 #include "car_control.hpp"
 #include "event_timer.hpp"
+#include "scheduler.hpp"
 #include "zgc_draw_tool.hpp"
 
 #include <algorithm>
@@ -3802,6 +3803,14 @@ namespace
 
     void start_circle(CircleDirection direction, MonotonicEventTimer::TimePoint now)
     {
+        // 入口特征计算期间可能异步触发绕行，创建圆环状态前再做一次最终确认。
+        if (obstacle_avoid_active())
+        {
+            g_left_circle_entry_candidate_frames = 0;
+            g_right_circle_entry_candidate_frames = 0;
+            return;
+        }
+
         clear_circle_runtime_data();
         Image_Flag.Left_Circle = direction == CircleDirection::Left;
         Image_Flag.Right_Circle = direction == CircleDirection::Right;
@@ -3897,7 +3906,10 @@ void Island_Detect(void)//环岛检测
     if(island_state==0)
     {
         const bool cooldown_active = circle_normal_exit_cooldown_active(now);
-        if(Image_Flag.Cross_Fill!=0 || cooldown_active)
+        // 绕行会主动改变可靠边和中线偏移，期间的边线形态不能用于新建圆环状态。
+        // 此限制只放在状态 0；如果绕行前已在圆环内，状态 1~6 仍继续推进。
+        const bool obstacle_avoid_blocks_entry = obstacle_avoid_active();
+        if(Image_Flag.Cross_Fill!=0 || cooldown_active || obstacle_avoid_blocks_entry)
         {
             g_left_circle_entry_candidate_frames = 0;
             g_right_circle_entry_candidate_frames = 0;
@@ -4698,6 +4710,41 @@ void draw_debug_scaled_line(uint16 (*img)[image_width],
     dbg_line(img, x1, y1, x2, y2, color);
 }
 
+// 右下混合 IPM 视角同时包含视觉 y=0~119 和车身参考 y=138，与普通原图视角分开映射。
+constexpr int k_composite_ipm_vehicle_x = 79;
+constexpr int k_composite_ipm_display_max_y = 138;
+
+int composite_ipm_display_x(int dst_x, int dst_w, int source_x)
+{
+    const int clamped_x = std::clamp(source_x, 0, image_width - 1);
+    return dst_x + clamped_x * dst_w / image_width;
+}
+
+int composite_ipm_display_y(int dst_y, int dst_h, int source_y)
+{
+    const int clamped_y = std::clamp(source_y, 0, k_composite_ipm_display_max_y);
+    return dst_y + clamped_y * (dst_h - 1) / k_composite_ipm_display_max_y;
+}
+
+void draw_composite_ipm_scaled_line(uint16 (*img)[image_width],
+                                    int dst_x,
+                                    int dst_y,
+                                    int dst_w,
+                                    int dst_h,
+                                    int source_x1,
+                                    int source_y1,
+                                    int source_x2,
+                                    int source_y2,
+                                    uint16 color)
+{
+    dbg_line(img,
+             composite_ipm_display_x(dst_x, dst_w, source_x1),
+             composite_ipm_display_y(dst_y, dst_h, source_y1),
+             composite_ipm_display_x(dst_x, dst_w, source_x2),
+             composite_ipm_display_y(dst_y, dst_h, source_y2),
+             color);
+}
+
 void draw_scaled_source_image(uint16 (*img)[image_width],
                               const uint8 (*src)[image_width],
                               int dst_x,
@@ -4769,6 +4816,7 @@ void draw_composite_ipm_view(uint16 (*img)[image_width],
     const uint16 mid_color = debug_color(RGB565_RED);
     const uint16 control_mid_color = debug_color(RGB565_BLUE);
     const uint16 preview_color = debug_color(RGB565_RED);
+    const uint16 raw_last_y_color = debug_color(static_cast<uint16>(0x87F0)); // 浅绿色
     const uint16 border_color = debug_color(RGB565_GRAY);
 
     dbg_fill_rect(img, dst_x, dst_y, dst_x + dst_w - 1, dst_y + dst_h - 1, bg_color);
@@ -4780,16 +4828,16 @@ void draw_composite_ipm_view(uint16 (*img)[image_width],
             if (is_ipm_continuous(points[i - 1][0], points[i - 1][1],
                                   points[i][0], points[i][1]))
             {
-                draw_debug_scaled_line(img,
-                                       dst_x,
-                                       dst_y,
-                                       dst_w,
-                                       dst_h,
-                                       points[i - 1][0],
-                                       points[i - 1][1],
-                                       points[i][0],
-                                       points[i][1],
-                                       color);
+                draw_composite_ipm_scaled_line(img,
+                                               dst_x,
+                                               dst_y,
+                                               dst_w,
+                                               dst_h,
+                                               points[i - 1][0],
+                                               points[i - 1][1],
+                                               points[i][0],
+                                               points[i][1],
+                                               color);
             }
         }
     };
@@ -4805,12 +4853,39 @@ void draw_composite_ipm_view(uint16 (*img)[image_width],
     {
         draw_point_line(Ipm_Mid_Points, Ipm_Mid_Point_Count, mid_color);
     }
+
+    // 控制预矄从车身 (79,138) 指向蓝线首点；调试点集的 y 会被限制119，因此单独补画这段。
+    if (Control_Ipm_Extended_Mid_Point_Count > 0)
+    {
+        draw_composite_ipm_scaled_line(img,
+                                       dst_x,
+                                       dst_y,
+                                       dst_w,
+                                       dst_h,
+                                       k_composite_ipm_vehicle_x,
+                                       k_composite_ipm_display_max_y,
+                                       Control_Ipm_Extended_Mid_Points[0][0],
+                                       Control_Ipm_Extended_Mid_Points[0][1],
+                                       control_mid_color);
+    }
     draw_point_line(Control_Ipm_Extended_Mid_Points, Control_Ipm_Extended_Mid_Point_Count, control_mid_color);
+
+    // y=119 是视觉原始 IPM 的最后一行，用浅绿线分隔车身参考区域。
+    draw_composite_ipm_scaled_line(img,
+                                   dst_x,
+                                   dst_y,
+                                   dst_w,
+                                   dst_h,
+                                   0,
+                                   119,
+                                   image_width - 1,
+                                   119,
+                                   raw_last_y_color);
 
     if (Control_Ipm_Preview_Target_Valid)
     {
-        const int x = dst_x + Control_Ipm_Preview_Target[0] * dst_w / image_width;
-        const int y = dst_y + Control_Ipm_Preview_Target[1] * dst_h / image_height;
+        const int x = composite_ipm_display_x(dst_x, dst_w, Control_Ipm_Preview_Target[0]);
+        const int y = composite_ipm_display_y(dst_y, dst_h, Control_Ipm_Preview_Target[1]);
         dbg_circle(img, x, y, 3, preview_color);
     }
 }
@@ -4862,6 +4937,7 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
     const uint16 both_color = debug_color(RGB565_YELLOW);
     const uint16 state_color = debug_color(RGB565_PURPLE);
     const uint16 empty_color = debug_color(RGB565_GRAY);
+    const uint16 avoid_color = debug_color(RGB565_RED);
 
     dbg_fill_rect(img, x, y, x + w - 1, y + h - 1, bg_color);
 
@@ -4889,13 +4965,23 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
     {
         dbg_text_3x5(img, x + 2, y + 43, "FLOS", lost_color, bg_color, true);
     }
+
+    // 右上状态区在发生绕行时显示绕行方向。
+    if (obstacle_avoid_active())
+    {
+        char avoid_text[12] = {0};
+        std::snprintf(avoid_text,
+                      sizeof(avoid_text),
+                      "AVD:%s",
+                      obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
+        dbg_text_3x5(img, x + 2, y + 50, avoid_text, avoid_color, bg_color, true);
+    }
 }
 
 void draw_composite_reliable_edge_panel(uint16 (*img)[image_width], int x, int y, int w, int h)
 {
     const uint16 bg_color = debug_color(RGB565_BLACK);
     const uint16 text_color = debug_color(RGB565_YELLOW);
-    const uint16 avoid_color = debug_color(RGB565_RED);
 
     dbg_fill_rect(img, x, y, x + w - 1, y + h - 1, bg_color);
 
@@ -4915,15 +5001,23 @@ void draw_composite_reliable_edge_panel(uint16 (*img)[image_width], int x, int y
     std::snprintf(offset_text, sizeof(offset_text), "OFF:%4.1f", g_ipm_midline_offset_px.load());
     dbg_text_3x5(img, x + 2, y + 11, offset_text, text_color, bg_color, true);
 
-    if (obstacle_avoid_active())
-    {
-        char avoid_text[12] = {0};
-        std::snprintf(avoid_text,
-                      sizeof(avoid_text),
-                      "AVD:%s",
-                      obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
-        dbg_text_3x5(img, x + 2, y + 20, avoid_text, avoid_color, bg_color, true);
-    }
+    // 左下状态区显示当前图像处理帧率。
+    char fps_text[16] = {0};
+    std::snprintf(fps_text, sizeof(fps_text), "FPS:%4.1f", g_fps_value);
+    dbg_text_3x5(img, x + 2, y + 20, fps_text, text_color, bg_color, true);
+
+    // Line_Error 是 pure pursuit 最终发布的 alpha 角，单位为度。
+    char alpha_text[16] = {0};
+    std::snprintf(alpha_text, sizeof(alpha_text), "ALP:%+.1f", Line_Error);
+    dbg_text_3x5(img, x + 2, y + 29, alpha_text, text_color, bg_color, true);
+
+    const WheelControlTelemetry wheel = wheel_control_telemetry_snapshot();
+    char left_pwm_text[16] = {0};
+    char right_pwm_text[16] = {0};
+    std::snprintf(left_pwm_text, sizeof(left_pwm_text), "PL:%+.1f", wheel.left_pwm);
+    std::snprintf(right_pwm_text, sizeof(right_pwm_text), "PR:%+.1f", wheel.right_pwm);
+    dbg_text_3x5(img, x + 2, y + 38, left_pwm_text, text_color, bg_color, true);
+    dbg_text_3x5(img, x + 2, y + 47, right_pwm_text, text_color, bg_color, true);
 }
 
 void build_composite_debug_image(uint16 (*img)[image_width], bool show_binary)
