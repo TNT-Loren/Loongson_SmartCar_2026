@@ -3,18 +3,17 @@
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
 
-//5.2 0.12 angle
-// 提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
+// 5.2 0.12 angle
+//  提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
 #include "../code/vs_inference.hpp"
+#include "../code/vs_ai_stream.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <termios.h>
 #include <unistd.h>
 
-
-
-//键盘输入相关的全局变量和函数声明 （方便调试）
+// 键盘输入相关的全局变量和函数声明 （方便调试）
 static struct termios g_old_tio;
 static bool g_keyboard_ready = false;
 // stty sane   // 恢复终端默认设置的命令，程序退出时会调用
@@ -22,11 +21,10 @@ void keyboard_init_simple();
 void keyboard_restore_simple();
 void keyboard_poll_simple();
 
-
 float test1, test2, test3, test4;
 int key_mode = 0;
 
-bool g_vs_ready = false;              // VS是否初始化成功（单摄像头时可能失败，降级跳过）
+bool g_vs_ready = false; // VS是否初始化成功（单摄像头时可能失败，降级跳过）
 
 //===================================================
 void cleanup();
@@ -71,21 +69,21 @@ int main(int, char **)
 {
     //  esc_init();
     //  esc_set_speed_percent(0);
-     imu_init();
-     Encoder_Init();
-     Beep_Init();
-     motor_init();
-   //  Menu_Init();
-        // if (tcp_debug_init("192.168.31.20", 8086))
-        // {
-        //    //tcp_bind_variables(&target_yaw, &yaw);
-        //    //tcp_bind_variables(&speed1, &speed2);
-        // }
-    if (!(tcp_image_transmission_init("192.168.31.30", 8086)))
+    imu_init();
+    Encoder_Init();
+    Beep_Init();
+    motor_init();
+    //  Menu_Init();
+    // if (tcp_debug_init("192.168.31.20", 8086))
+    // {
+    //    //tcp_bind_variables(&target_yaw, &yaw);
+    //    //tcp_bind_variables(&speed1, &speed2);
+    // }
+    if (!(tcp_image_transmission_init("192.168.31.20", 8086)))
     {
         return -1;
     }
-   // tcp_bind_variables(&target_yaw, &yaw, &speed1, &speed2);
+    // tcp_bind_variables(&target_yaw, &yaw, &speed1, &speed2);
 
     if (uvc_dev.init(UVC_PATH) < 0)
     {
@@ -93,19 +91,27 @@ int main(int, char **)
         return -1; // 摄像头初始化失败，直接退出程序
     }
     // VS/NCNN 初始化
-    //  g_vs_ready = g_vs.init_smartcar_defaults(&uvc_dev);
-    //  if (!g_vs_ready)
-    //  {
-    //      printf("vs init failed, AI/图传降级跳过\r\n");
-    //  }
+    // 通过调用这个方法可以实现左右色块和预警的解放，
+    // 0 同时限制 CX_MIN 和 CX_MAX
+    // 1 只限制左侧 CX_MIN
+    // 2 只限制右侧 CX_MAX
+    g_vs.set_cx_limit_mode(0);
+    g_vs_ready = g_vs.init_smartcar_defaults(&uvc_dev);
+    if (!g_vs_ready)
+    {
+        printf("vs init failed, AI/图传降级跳过\r\n");
+    }
+#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_DEFAULT_ENABLED
+    vs_ai_stream_set_enabled(true);
+#endif
     //  ===== VS添加结束 =====
 
     atexit(cleanup);
     signal(SIGINT, sigint_handler);
-    keyboard_init_simple();// 初始化简单键盘输入，供调试用
+    keyboard_init_simple(); // 初始化简单键盘输入，供调试用
 
-    uvc_dev.set_auto_exposure(1); // 关闭自动曝光，进入手动模式，才能设置曝光值
-    uvc_dev.set_exposure_value(100); // 设置初始曝光值
+    uvc_dev.set_auto_exposure(1);    // 关闭自动曝光，进入手动模式，才能设置曝光值
+    uvc_dev.set_exposure_value(120); // 设置初始曝光值
     {
         std::lock_guard<std::mutex> lock(g_vision_result_mutex);
         vision_target_yaw = yaw;
@@ -127,10 +133,10 @@ int main(int, char **)
     while (1)
     {
         // Menu_Task();
-        //Set_Beeptime(5000);      // 响 500ms
+        // Set_Beeptime(5000);      // 响 500ms
         keyboard_poll_simple(); // 轮询键盘输入，供调试用
                                 // esc_set_speed_percent(test1);
-         //esc_set_speed_percent(20);
+                                // esc_set_speed_percent(20);
         fps_timer_start();
         if (image_test())
         {
@@ -142,31 +148,43 @@ int main(int, char **)
         }
         fps_timer_end();
         // ===== VS添加：AI视觉推理 — 复用巡线已抓帧，彩色给AI，不额外等帧 =====
-        // if (g_vs_ready)
-        // {
-        //     cv::Mat color_frame = uvc_dev.get_frame_mjpg();
-        //     if (!g_vs.tick_bgr(color_frame))
-        //     {
-        //         printf("vs.tick error\r\n");
-        //     }
-        //     else
-        //     {
-        //         tcp_camera_update_vs_image();
-        //     }
-        //     if (g_vs.consume_new_result(result))
-        //     {
-        //         // AI结果映射绕行：武器→左绕  物资→右绕  载具→直行压过
-        //         if (result == "武器")
-        //         {
-        //             trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
-        //         }
-        //         else if (result == "物资")
-        //         {
-        //             trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
-        //         }
-        //         // 载具/交通工具 → 直行，不触发绕行
-        //     }
-        // }
+        if (g_vs_ready)
+        {
+            cv::Mat color_frame = uvc_dev.get_frame_mjpg();
+            if (!g_vs.tick_bgr(color_frame))
+            {
+                printf("vs.tick error\r\n");
+            }
+            else
+            {
+                tcp_camera_update_vs_image();
+            }
+            // 预警必须先于最终分类处理：先建立状态 1，同帧到达的最终结果再确认左右方向。
+            if (g_vs.consume_red_warning())
+            {
+                printf("red warning -> decelerate %s\r\n",
+                       obstacle_avoid_warning_request() ? "accepted" : "ignored");
+            }
+            if (g_vs.consume_new_result(result))
+            {
+                bool result_accepted = false;
+                if (result == "武器")
+                {
+                    result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Left);
+                }
+                else if (result == "物资")
+                {
+                    result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Right);
+                }
+                else
+                {
+                    // 载具、错误等非绕行结果只取消尚在等待分类的状态 1。
+                    result_accepted = obstacle_avoid_cancel_warning();
+                }
+                printf("AI result -> obstacle FSM %s\r\n",
+                       result_accepted ? "accepted" : "ignored");
+            }
+        }
         // ===== VS添加结束 =====
         if (need_print.load() == 1)
         {
@@ -211,7 +229,7 @@ int main(int, char **)
     }
 }
 
-void print_ipm_mid_points_snapshot()// 供调试用的函数：打印一帧 IPM 中线点集的快照到控制台
+void print_ipm_mid_points_snapshot() // 供调试用的函数：打印一帧 IPM 中线点集的快照到控制台
 {
     uint16 mid_points[MT9V03X_H][2] = {};
     uint16 mid_count = 0;
@@ -260,8 +278,6 @@ void print_ipm_mid_points_snapshot()// 供调试用的函数：打印一帧 IPM 
     }
 }
 
-
-
 //================================================================
 void sigint_handler(int signum)
 {
@@ -277,7 +293,7 @@ void sigint_handler(int signum)
 void cleanup()
 {
     Menu_Force_Stop();
-    keyboard_restore_simple();// 恢复键盘设置，防止程序退出后终端异常
+    keyboard_restore_simple(); // 恢复键盘设置，防止程序退出后终端异常
     // 采用中央调度器，全车只有一个定时器
     master_timer.stop();
 
@@ -366,21 +382,38 @@ void keyboard_poll_simple()
             print_ipm_mid_points_snapshot();
             break;
 
+        case 'v':
+        case 'V':
+            g_vs.cycle_color_debug_view();
+            std::cout << "VS view -> "
+                      << g_vs.get_color_debug_view_name()
+                      << std::endl;
+            break;
+
+        case 'u':
+        case 'U':
+#if VS_AI_STREAM_FEATURE_ENABLE
+            std::cout << "VS AI stream -> "
+                      << (vs_ai_stream_toggle_enabled() ? "ON" : "OFF")
+                      << std::endl;
+#else
+            std::cout << "VS AI stream -> COMPILED_OUT" << std::endl;
+#endif
+            break;
+
         case 'q':
         case 'Q':
-            // 手动模拟“左绕行”：用左边线作为定时临时中线参考。
-            trigger_obstacle_avoid(ObstacleAvoidDirection::Left);
-            std::cout << "obstacle avoid -> L, offset="
-                      << g_ipm_midline_offset_px.load()
+            // 手动模拟完整左绕行状态机。
+            std::cout << "obstacle avoid request L -> "
+                      << (obstacle_avoid_request(ObstacleAvoidDirection::Left) ? "accepted" : "ignored")
                       << std::endl;
             break;
 
         case 'e':
         case 'E':
-            // 手动模拟“右绕行”：用右边线作为定时临时中线参考。
-            trigger_obstacle_avoid(ObstacleAvoidDirection::Right);
-            std::cout << "obstacle avoid -> R, offset="
-                      << g_ipm_midline_offset_px.load()
+            // 手动模拟完整右绕行状态机。
+            std::cout << "obstacle avoid request R -> "
+                      << (obstacle_avoid_request(ObstacleAvoidDirection::Right) ? "accepted" : "ignored")
                       << std::endl;
             break;
 

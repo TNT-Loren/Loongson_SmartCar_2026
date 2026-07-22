@@ -1,10 +1,16 @@
 #include "vs_inference.hpp"
+#include "vs_ai_stream.hpp"
 #include <chrono>
 #include <cstring>
 #include <cmath>
 #include <iostream>
 
 VSInference g_vs;
+
+#if VS_AI_STREAM_FEATURE_ENABLE
+static_assert(VS_BOX_SIZE == 64,
+              "VS AI stream protocol currently requires a 64x64 model ROI");
+#endif
 
 // ===================================================================
 // 内部类型别名（隐藏逐飞 SDK 具体类型）
@@ -86,7 +92,50 @@ bool VSInference::init(const std::vector<std::string> &_labels,
                        float mean_vals[3], float norm_vals[3])
 {
     labels = _labels;
+    initialized = false;
+    red_warning.store(false, std::memory_order_relaxed);
+    warning_armed = true;
+    warning_clear_count = 0;
 
+    if (cfg.color_detect_y_max < 0 || cfg.color_detect_y_max >= UVC_HEIGHT ||
+        cfg.finalize_y > cfg.color_detect_y_max)
+    {
+        printf("VS color detect Y must satisfy finalize_y <= max < %d, current finalize=%d max=%d\r\n",
+               UVC_HEIGHT, cfg.finalize_y, cfg.color_detect_y_max);
+        return false;
+    }
+    if (cfg.cx_min < 0 || cfg.cx_max < cfg.cx_min || cfg.cx_max >= UVC_WIDTH)
+    {
+        printf("VS X range must satisfy 0 <= min <= max < %d, current=[%d, %d]\r\n",
+               UVC_WIDTH, cfg.cx_min, cfg.cx_max);
+        return false;
+    }
+    if (cfg.by_min < 0 || cfg.by_max <= cfg.by_min)
+    {
+        printf("VS Y range must satisfy 0 <= by_min < by_max, current=[%d, %d]\r\n",
+               cfg.by_min, cfg.by_max);
+        return false;
+    }
+    if (cfg.warning_area_min < 0 || cfg.warning_area_max < cfg.warning_area_min)
+    {
+        printf("VS warning area must satisfy 0 <= min <= max, current=[%d, %d]\r\n",
+               cfg.warning_area_min, cfg.warning_area_max);
+        return false;
+    }
+    if (cfg.warning_clear_frames <= 0)
+    {
+        printf("VS warning clear frames must be positive, current=%d\r\n",
+               cfg.warning_clear_frames);
+        return false;
+    }
+#if VS_ENABLE_RED_MASK_CLOSE
+    if (cfg.red_close_kernel_size_px <= 0 || cfg.red_close_iterations <= 0)
+    {
+        printf("VS red close config requires positive kernel px and iterations, current kernel_px=%d iterations=%d\r\n",
+               cfg.red_close_kernel_size_px, cfg.red_close_iterations);
+        return false;
+    }
+#endif
     if (cfg.finalize_y < cfg.by_max || cfg.finalize_y >= UVC_HEIGHT)
     {
         printf("VS finalize_y must be within [%d, %d], current=%d\r\n",
@@ -146,18 +195,49 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     roi = cv::Mat(cfg.box_size, cfg.box_size, CV_8UC3);
     tx_frame = cv::Mat(UVC_HEIGHT, UVC_WIDTH, CV_8UC3);
 
-    // HSV 降采样缓冲区
+    // HSV 只处理 Y=0..color_detect_y_max，先裁剪再降采样以减少色域计算量。
+    detect_h = cfg.color_detect_y_max + 1;
     if (cfg.hsv_scale > 1)
     {
         hsv_w = UVC_WIDTH / cfg.hsv_scale;
-        hsv_h = UVC_HEIGHT / cfg.hsv_scale;
+        hsv_h = (detect_h + cfg.hsv_scale - 1) / cfg.hsv_scale;
         src_small = cv::Mat(hsv_h, hsv_w, CV_8UC3);
     }
     else
     {
         hsv_w = UVC_WIDTH;
-        hsv_h = UVC_HEIGHT;
+        hsv_h = detect_h;
     }
+
+    // 缩小图尺寸不一定能被原图整除。预先记录每个缩小像素在320x240坐标中
+    // 实际覆盖的宽高，后续面积阈值始终使用原图像素数，而不是缩小图像素数。
+    hsv_x_pixel_weights.resize(hsv_w);
+    for (int x = 0; x < hsv_w; ++x)
+    {
+        hsv_x_pixel_weights[x] =
+            ((x + 1) * UVC_WIDTH / hsv_w) - (x * UVC_WIDTH / hsv_w);
+    }
+    hsv_y_pixel_weights.resize(hsv_h);
+    for (int y = 0; y < hsv_h; ++y)
+    {
+        hsv_y_pixel_weights[y] =
+            ((y + 1) * detect_h / hsv_h) - (y * detect_h / hsv_h);
+    }
+
+#if VS_ENABLE_RED_MASK_CLOSE
+    // 调参值使用320x240原图像素，内部按实际缩放比例换算并保持奇数核。
+    int close_w = std::max(1, (cfg.red_close_kernel_size_px * hsv_w + UVC_WIDTH / 2) / UVC_WIDTH);
+    int close_h = std::max(1, (cfg.red_close_kernel_size_px * hsv_h + detect_h / 2) / detect_h);
+    if ((close_w & 1) == 0)
+        ++close_w;
+    if ((close_h & 1) == 0)
+        ++close_h;
+    red_close_kernel = cv::getStructuringElement(
+        cv::MORPH_RECT, cv::Size(close_w, close_h));
+    // 闭运算包含膨胀和腐蚀，两阶段的总依赖半径用于局部ROI外扩。
+    red_close_margin_x = (close_w / 2) * cfg.red_close_iterations * 2;
+    red_close_margin_y = (close_h / 2) * cfg.red_close_iterations * 2;
+#endif
 
     // ---- 4. 预计算 Y 方向指数权重 LUT ----
     lut_ofs = cfg.by_min;
@@ -176,6 +256,7 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     printf("权重LUT初始化完成 (%d entries)\n", lut_size + 1);
 #endif
 
+    initialized = true;
     return true;
 }
 
@@ -185,17 +266,19 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
 
     // 默认参数统一来自 vs_inference.hpp 的“VS 调参区”宏。
     // 此处保留赋值，便于后续如果 main 侧先改 cfg，也能用默认配置一键覆盖。
+    cfg.color_detect_y_max = VS_COLOR_DETECT_Y_MAX;
+    cfg.red_close_kernel_size_px = VS_RED_CLOSE_KERNEL_SIZE_PX;
+    cfg.red_close_iterations = VS_RED_CLOSE_ITERATIONS;
     cfg.box_size = VS_BOX_SIZE;
     cfg.box_y_offset = VS_BOX_Y_OFFSET_PX;
     cfg.area_min = VS_AREA_MIN;
     cfg.area_max = VS_AREA_MAX;
-#if VS_ENABLE_ZONE_AREA_MAX
-    cfg.zone_end_y = VS_ZONE_END_Y;
-    cfg.zone_area_max = VS_ZONE_AREA_MAX;
-#endif
     cfg.hsv_scale = VS_HSV_SCALE;
     cfg.cx_min = VS_CX_MIN;
     cfg.cx_max = VS_CX_MAX;
+    cfg.warning_area_min = VS_WARNING_AREA_MIN;
+    cfg.warning_area_max = VS_WARNING_AREA_MAX;
+    cfg.warning_clear_frames = VS_WARNING_CLEAR_FRAMES;
     cfg.by_min = VS_BY_MIN;
     cfg.by_max = VS_BY_MAX;
     cfg.finalize_y = VS_FINALIZE_Y;
@@ -222,11 +305,41 @@ void VSInference::set_external_camera(void *ext_uvc)
     ext_uvc_dev = ext_uvc;
 }
 
+bool VSInference::set_cx_limit_mode(int mode)
+{
+    if (mode < VS_CX_LIMIT_BOTH || mode > VS_CX_LIMIT_RIGHT_ONLY)
+    {
+        return false;
+    }
+    cx_limit_mode.store(mode, std::memory_order_relaxed);
+    return true;
+}
+
+int VSInference::get_cx_limit_mode() const
+{
+    return cx_limit_mode.load(std::memory_order_relaxed);
+}
+
+bool VSInference::cx_is_valid(int cx, int mode) const
+{
+    if (mode == VS_CX_LIMIT_LEFT_ONLY)
+        return cx >= cfg.cx_min;
+    if (mode == VS_CX_LIMIT_RIGHT_ONLY)
+        return cx <= cfg.cx_max;
+    return cx >= cfg.cx_min && cx <= cfg.cx_max;
+}
+
 // ===================================================================
 // tick — 单帧完整处理周期（内部 wait + RGB565 解码）
 // ===================================================================
 bool VSInference::tick()
 {
+    if (!initialized || uvc_dev == nullptr)
+    {
+        printf("VS tick called before successful init\r\n");
+        return false;
+    }
+
     auto *uvc = static_cast<UVCDev *>(uvc_dev);
 
     // ---- 6.1 阻塞等待新帧 ----
@@ -273,6 +386,20 @@ bool VSInference::tick()
 // ===================================================================
 bool VSInference::tick_bgr(const cv::Mat &bgr)
 {
+    if (!initialized)
+    {
+        printf("VS tick_bgr called before successful init\r\n");
+        return false;
+    }
+    if (bgr.empty() || bgr.type() != CV_8UC3 ||
+        bgr.cols != UVC_WIDTH || bgr.rows != UVC_HEIGHT)
+    {
+        printf("VS invalid BGR frame: type=%d size=%dx%d, expected CV_8UC3 %dx%d\r\n",
+               bgr.empty() ? -1 : bgr.type(), bgr.cols, bgr.rows,
+               UVC_WIDTH, UVC_HEIGHT);
+        return false;
+    }
+
     // 直接拷贝外部 BGR 帧到内部工作缓冲区
     bgr.copyTo(src);
 
@@ -290,66 +417,116 @@ bool VSInference::tick_bgr(const cv::Mat &bgr)
 // ===================================================================
 void VSInference::process_frame(cv::Mat &src)
 {
-    // ---- 选择检测图像（降采样以降低算力）----
-    cv::Mat &detect = (cfg.hsv_scale > 1) ? src_small : src;
+    // ---- 先裁剪 Y=0..color_detect_y_max，再降采样；下半幅不进入色域计算 ----
+    cv::Mat detect_source = src(cv::Rect(0, 0, UVC_WIDTH, detect_h));
     if (cfg.hsv_scale > 1)
-        cv::resize(src, src_small, cv::Size(hsv_w, hsv_h));
+    {
+        // 最近邻缩放计算量更低，也不会把红色与背景线性混色造成新的掩膜断裂。
+        cv::resize(detect_source, src_small, cv::Size(hsv_w, hsv_h),
+                   0, 0, cv::INTER_NEAREST);
+    }
+    cv::Mat &detect = (cfg.hsv_scale > 1) ? src_small : detect_source;
 
     // ---- HSV + 红色双区间提取 ----
     cv::cvtColor(detect, hsv, cv::COLOR_BGR2HSV);
     cv::inRange(hsv, cfg.hsv1_low, cfg.hsv1_high, mask1);
     cv::inRange(hsv, cfg.hsv2_low, cfg.hsv2_high, mask2);
-    mask = mask1 | mask2;
+    cv::bitwise_or(mask1, mask2, mask);
 
-    // ---- 查找轮廓 ----
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    red_component_count = 1;
+    red_component_areas.clear();
+    red_component_roi = cv::boundingRect(mask);
+    // boundingRect同时完成非零检查；空画面直接跳过补色和连通域扫描。
+    if (red_component_roi.area() > 0)
+    {
+#if VS_ENABLE_RED_MASK_CLOSE
+        // 只处理红色像素附近区域；外扩覆盖闭运算全部依赖范围，效果等同整图处理。
+        const int x0 = std::max(0, red_component_roi.x - red_close_margin_x);
+        const int y0 = std::max(0, red_component_roi.y - red_close_margin_y);
+        const int x1 = std::min(mask.cols,
+                                red_component_roi.x + red_component_roi.width + red_close_margin_x);
+        const int y1 = std::min(mask.rows,
+                                red_component_roi.y + red_component_roi.height + red_close_margin_y);
+        red_component_roi = cv::Rect(x0, y0, x1 - x0, y1 - y0);
+        cv::Mat close_roi = mask(red_component_roi);
+        cv::morphologyEx(close_roi, close_roi, cv::MORPH_CLOSE, red_close_kernel,
+                         cv::Point(-1, -1), cfg.red_close_iterations,
+                         cv::BORDER_CONSTANT | cv::BORDER_ISOLATED,
+                         cv::morphologyDefaultBorderValue());
+#endif
+
+        cv::Mat component_mask = mask(red_component_roi);
+        red_component_count = cv::connectedComponentsWithStats(
+            component_mask, red_component_labels, red_component_stats,
+            red_component_centroids, 8, CV_32S);
+
+        // 按缩放网格实际覆盖范围累计，结果单位严格对应320x240原图像素。
+        red_component_areas.assign(red_component_count, 0);
+        for (int y = 0; y < red_component_labels.rows; ++y)
+        {
+            const int *labels_row = red_component_labels.ptr<int>(y);
+            const int source_y = y + red_component_roi.y;
+            const int row_weight = hsv_y_pixel_weights[source_y];
+            for (int x = 0; x < red_component_labels.cols; ++x)
+            {
+                const int label = labels_row[x];
+                if (label > 0)
+                {
+                    const int source_x = x + red_component_roi.x;
+                    red_component_areas[label] +=
+                        hsv_x_pixel_weights[source_x] * row_weight;
+                }
+            }
+        }
+    }
 
     has_best = false;
     roi_valid = false;
+    best_cx = -1;
     best_by = -1;
 #if VS_ENABLE_TERMINAL_OUTPUT
     best_area = 0;
 #endif
 
     int half = cfg.box_size / 2;
+    bool warning_detected = false;
+    const int current_cx_limit_mode =
+        cx_limit_mode.load(std::memory_order_relaxed);
 
     // ---- 筛选最优目标 ----
-    for (size_t i = 0; i < contours.size(); i++)
+    for (int i = 1; i < red_component_count; ++i)
     {
-        int area = (int)contourArea(contours[i]);
+        const int sx = red_component_stats.at<int>(i, cv::CC_STAT_LEFT) + red_component_roi.x;
+        const int sy = red_component_stats.at<int>(i, cv::CC_STAT_TOP) + red_component_roi.y;
+        const int sw = red_component_stats.at<int>(i, cv::CC_STAT_WIDTH);
+        const int sh = red_component_stats.at<int>(i, cv::CC_STAT_HEIGHT);
 
-        cv::RotatedRect rr = minAreaRect(contours[i]);
-        cv::Point2f v[4];
-        rr.points(v);
-        int by = (int)v[0].y;
-        for (int j = 1; j < 4; j++)
-            if (v[j].y > by)
-                by = v[j].y;
+        // 按缩放网格边界映射，坐标单位始终是320x240原图像素。
+        const int left = sx * UVC_WIDTH / hsv_w;
+        const int right = (sx + sw) * UVC_WIDTH / hsv_w - 1;
+        const int cx = (left + right) / 2;
+        const int by = (sy + sh) * detect_h / hsv_h - 1;
 
-        int cx = (int)rr.center.x;
+        // 预警区和正式检测区共用X限幅；范围外轮廓不再计算面积和后续条件。
+        if (!cx_is_valid(cx, current_cx_limit_mode))
+            continue;
 
-        // ---- 坐标从降采样空间映射回原始分辨率（320×240）----
-        if (cfg.hsv_scale > 1)
+        const int area = red_component_areas[i];
+
+        // 预警区位于图像顶部到 BY_MIN 之前，BY_MIN 起进入正式模型有效区。
+        if (by >= 0 && by < cfg.by_min &&
+            area >= cfg.warning_area_min && area <= cfg.warning_area_max)
         {
-            cx *= cfg.hsv_scale;
-            by *= cfg.hsv_scale;
-            area *= (cfg.hsv_scale * cfg.hsv_scale);
+            warning_detected = true;
         }
 
         // 过滤噪点（面积阈值在原始分辨率空间，不受 hsv_scale 影响）
         if (area < cfg.area_min)
             continue;
 
-        // 默认统一使用 area_max；启用后，上半区改用更严格的独立面积上限。
-#if VS_ENABLE_ZONE_AREA_MAX
-        const int amax = (by < cfg.zone_end_y) ? cfg.zone_area_max : cfg.area_max;
-        if (area > amax)
-            continue;
-#else
+        // 所有正式检测区域统一使用同一个面积上限。
         if (area > cfg.area_max)
             continue;
-#endif
 
         cv::Point tl(cx - half, by - cfg.box_size + 1 + cfg.box_y_offset);
         cv::Point br(cx + half - 1, by + cfg.box_y_offset);
@@ -360,14 +537,14 @@ void VSInference::process_frame(cv::Mat &src)
         const int y_max = extending_track
                               ? std::min(UVC_HEIGHT - 1, cfg.finalize_y + cfg.hsv_scale)
                               : cfg.by_max;
-        bool xok = (cx >= cfg.cx_min && cx <= cfg.cx_max);
         bool yok = (by >= cfg.by_min && by <= y_max);
-        if (!xok || !yok)
+        if (!yok)
             continue;
 
         if (!has_best || by > best_by)
         {
             has_best = true;
+            best_cx = cx;
             best_by = by;
 #if VS_ENABLE_TERMINAL_OUTPUT
             best_area = area;
@@ -377,9 +554,40 @@ void VSInference::process_frame(cv::Mat &src)
         }
     }
 
+    if (warning_detected)
+    {
+        warning_clear_count = 0;
+        if (warning_armed)
+        {
+            // 同一个连续可见的色块只发布一次预警事件。
+            warning_armed = false;
+            red_warning.store(true, std::memory_order_release);
+#if VS_ENABLE_TERMINAL_OUTPUT
+            printf("[WARNING] red target detected before y=%d\r\n", cfg.by_min);
+#endif
+        }
+    }
+    else if (!has_best && state == IDLE)
+    {
+        // 误预警可能进不了模型有效区；必须连续多帧完全清空后才重新布防。
+        if (warning_clear_count < cfg.warning_clear_frames)
+        {
+            ++warning_clear_count;
+        }
+        if (warning_clear_count >= cfg.warning_clear_frames)
+        {
+            warning_armed = true;
+        }
+    }
+    else
+    {
+        // 目标已进入正式检测/跟踪区，本轮由最终分类负责结束。
+        warning_clear_count = 0;
+    }
+
 #if VS_ENABLE_TERMINAL_OUTPUT
     if (has_best)
-        printf("[AREA] %d px\r\n", best_area);
+        printf("[AREA] %d px^2 (320x240)\r\n", best_area);
 #endif
 
     // 提前结算后锁定本目标，直到检测区连续空闲若干帧再允许下一轮识别。
@@ -421,7 +629,19 @@ void VSInference::process_frame(cv::Mat &src)
     {
         int xs = std::max(0, best_tl.x), xe = std::min(UVC_WIDTH - 1, best_br.x);
         int ys = std::max(0, best_tl.y), ye = std::min(UVC_HEIGHT - 1, best_br.y);
-        src(cv::Rect(xs, ys, xe - xs + 1, ye - ys + 1)).copyTo(roi);
+        const cv::Mat cropped_roi = src(cv::Rect(xs, ys, xe - xs + 1, ye - ys + 1));
+        if (cropped_roi.cols == cfg.box_size && cropped_roi.rows == cfg.box_size)
+        {
+            cropped_roi.copyTo(roi);
+        }
+        else
+        {
+            // 靠近图像边界时原始框会被裁短。这里提前复用 Infer() 原有的线性缩放，
+            // 使模型和 AI 图传实际读取的始终是同一张固定尺寸 ROI。
+            cv::resize(cropped_roi, roi,
+                       cv::Size(cfg.box_size, cfg.box_size),
+                       0, 0, cv::INTER_LINEAR);
+        }
         roi_valid = !roi.empty();
 
         try
@@ -434,6 +654,19 @@ void VSInference::process_frame(cv::Mat &src)
 #if VS_ENABLE_TERMINAL_OUTPUT
             auto t1 = std::chrono::steady_clock::now();
             long long us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+#endif
+#if VS_AI_STREAM_FEATURE_ENABLE
+            // Infer() 成功后才发布，并且必须直接使用本次推理的同一份 64x64 ROI。
+            // 禁止在图传分支单独缩放，否则截图可能与模型实际输入不一致。
+            if (vs_ai_stream_is_enabled() &&
+                roi.type() == CV_8UC3 &&
+                roi.cols == VS_BOX_SIZE && roi.rows == VS_BOX_SIZE)
+            {
+                vs_ai_stream_publish_image(
+                    roi.ptr<std::uint8_t>(0), roi.step,
+                    static_cast<std::uint16_t>(best_cx),
+                    static_cast<std::uint16_t>(obj_by));
+            }
 #endif
 
             int yo = obj_by - lut_ofs;
@@ -457,9 +690,8 @@ void VSInference::process_frame(cv::Mat &src)
             track_cnt++;
 
 #if VS_ENABLE_TERMINAL_OUTPUT
-            const int obj_cx = (best_tl.x + best_br.x) / 2;
             printf("[TRACK #%d] center=(%d,%d) w=%.2f -> %s | %s (%lld us)\r\n",
-                   track_cnt, obj_cx, obj_by, w,
+                   track_cnt, best_cx, obj_by, w,
                    r.c_str(), classify_label(r).c_str(), us);
 #endif
 
@@ -532,7 +764,7 @@ void VSInference::process_frame(cv::Mat &src)
 // ===================================================================
 bool VSInference::build_color_block_roi_image()
 {
-    if (!roi_valid || roi.empty())
+    if (!initialized || !roi_valid || roi.empty())
     {
         return false;
     }
@@ -564,9 +796,15 @@ bool VSInference::build_color_block_roi_image()
 // ===================================================================
 bool VSInference::build_color_debug_image()
 {
-    if (src.empty())
+    if (!initialized || src.empty())
     {
         return false;
+    }
+
+    // 红色调参图只在上层实际请求构建图传画面时执行。
+    if (red_tuning_view)
+    {
+        return build_red_tuning_debug_image();
     }
 
     const bool need_box = roi_valid;
@@ -602,6 +840,122 @@ bool VSInference::build_color_debug_image()
 }
 
 // ===================================================================
+// build_red_tuning_debug_image — 红色阈值调参视图
+//   暗红：仅通过 HSV；亮红：预警区有效；绿色：正式检测区有效。
+//   仅在调参视图被选择且上层请求图传画面时运行，不进入普通推理路径。
+// ===================================================================
+bool VSInference::build_red_tuning_debug_image()
+{
+    if (mask.empty())
+    {
+        return false;
+    }
+
+    red_debug_warning_mask.create(mask.rows, mask.cols, CV_8UC1);
+    red_debug_warning_mask.setTo(cv::Scalar(0));
+    red_debug_normal_mask.create(mask.rows, mask.cols, CV_8UC1);
+    red_debug_normal_mask.setTo(cv::Scalar(0));
+    red_debug_full_mask.create(UVC_HEIGHT, UVC_WIDTH, CV_8UC1);
+    red_debug_full_mask.setTo(cv::Scalar(0));
+
+    const int scale = std::max(1, cfg.hsv_scale);
+    const bool extending_track = (state == TRACKING || state == WAIT_CLEAR);
+    const int normal_y_max = extending_track
+                                 ? std::min(UVC_HEIGHT - 1, cfg.finalize_y + scale)
+                                 : cfg.by_max;
+    const int current_cx_limit_mode =
+        cx_limit_mode.load(std::memory_order_relaxed);
+
+    std::vector<uint8_t> component_types(red_component_count, 0);
+    for (int i = 1; i < red_component_count; ++i)
+    {
+        const int sx = red_component_stats.at<int>(i, cv::CC_STAT_LEFT) + red_component_roi.x;
+        const int sy = red_component_stats.at<int>(i, cv::CC_STAT_TOP) + red_component_roi.y;
+        const int sw = red_component_stats.at<int>(i, cv::CC_STAT_WIDTH);
+        const int sh = red_component_stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        const int left = sx * UVC_WIDTH / hsv_w;
+        const int right = (sx + sw) * UVC_WIDTH / hsv_w - 1;
+        const int cx = (left + right) / 2;
+        const int by = (sy + sh) * detect_h / hsv_h - 1;
+
+        if (!cx_is_valid(cx, current_cx_limit_mode))
+            continue;
+
+        const int area = red_component_areas[i];
+
+        const bool warning_valid =
+            by >= 0 && by < cfg.by_min &&
+            area >= cfg.warning_area_min && area <= cfg.warning_area_max;
+
+        const int normal_area_max = cfg.area_max;
+        const bool normal_valid =
+            by >= cfg.by_min && by <= normal_y_max &&
+            area >= cfg.area_min && area <= normal_area_max;
+
+        if (warning_valid)
+            component_types[i] |= 1;
+        if (normal_valid)
+            component_types[i] |= 2;
+    }
+
+    // 根据主检测已生成的标签着色，不再重复提取或绘制轮廓。
+    if (red_component_count > 1)
+    {
+        for (int y = 0; y < red_component_labels.rows; ++y)
+        {
+            const int *labels_row = red_component_labels.ptr<int>(y);
+            uint8_t *warning_row = red_debug_warning_mask.ptr<uint8_t>(y + red_component_roi.y);
+            uint8_t *normal_row = red_debug_normal_mask.ptr<uint8_t>(y + red_component_roi.y);
+            for (int x = 0; x < red_component_labels.cols; ++x)
+            {
+                const uint8_t type = component_types[labels_row[x]];
+                if (type & 1)
+                    warning_row[x + red_component_roi.x] = 255;
+                if (type & 2)
+                    normal_row[x + red_component_roi.x] = 255;
+            }
+        }
+    }
+
+    tx_frame.setTo(cv::Scalar(0, 0, 0));
+
+    // 所有 HSV 命中显示为暗红，便于观察颜色阈值是否过宽。
+    cv::Mat full_detect_roi =
+        red_debug_full_mask(cv::Rect(0, 0, UVC_WIDTH, detect_h));
+    cv::resize(mask, full_detect_roi, cv::Size(UVC_WIDTH, detect_h),
+               0, 0, cv::INTER_NEAREST);
+    tx_frame.setTo(cv::Scalar(0, 0, 96), red_debug_full_mask);
+
+    // 通过预警区面积和位置筛选的区域覆盖为亮红。
+    red_debug_full_mask.setTo(cv::Scalar(0));
+    cv::resize(red_debug_warning_mask, full_detect_roi,
+               cv::Size(UVC_WIDTH, detect_h), 0, 0, cv::INTER_NEAREST);
+    tx_frame.setTo(cv::Scalar(0, 0, 255), red_debug_full_mask);
+
+    // 通过正式色块检测区筛选的区域覆盖为绿色。
+    red_debug_full_mask.setTo(cv::Scalar(0));
+    cv::resize(red_debug_normal_mask, full_detect_roi,
+               cv::Size(UVC_WIDTH, detect_h), 0, 0, cv::INTER_NEAREST);
+    tx_frame.setTo(cv::Scalar(0, 255, 0), red_debug_full_mask);
+
+#if VS_ENABLE_GUIDELINES
+    draw_guidelines(tx_frame);
+#endif
+    bgr_to_rgb565(tx_frame);
+    return true;
+}
+
+void VSInference::cycle_color_debug_view()
+{
+    red_tuning_view = !red_tuning_view;
+}
+
+const char *VSInference::get_color_debug_view_name() const
+{
+    return red_tuning_view ? "RED_TUNING" : "COLOR";
+}
+
+// ===================================================================
 // output_final — 汇总投票并输出最终结果
 // ===================================================================
 void VSInference::output_final(bool immediate)
@@ -623,6 +977,9 @@ void VSInference::output_final(bool immediate)
             votes.clear();
             best_w = 0;
             best_label = "";
+            red_warning.store(false, std::memory_order_release);
+            warning_armed = true;
+            warning_clear_count = 0;
             return;
         }
     }
@@ -636,6 +993,11 @@ void VSInference::output_final(bool immediate)
                         : std::chrono::duration_cast<std::chrono::milliseconds>(now - lost_since).count();
     result_ready = true;
     last_result_time = now;
+
+    // 当前目标已产生投票结果，清除旧事件并允许下一个目标再次触发一次预警。
+    red_warning.store(false, std::memory_order_release);
+    warning_armed = true;
+    warning_clear_count = 0;
 
 #if VS_ENABLE_TERMINAL_OUTPUT
     printf("\n========================================\n");
@@ -660,20 +1022,14 @@ void VSInference::output_final(bool immediate)
 // ===================================================================
 void VSInference::draw_guidelines(cv::Mat &src)
 {
-#if VS_ENABLE_ZONE_AREA_MAX
-    h_line(src, cfg.zone_end_y, cv::Scalar(0, 0, 255)); // 红色: 分区边界
-#endif
-    h_line(src, cfg.by_min, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 下界
+    h_line(src, cfg.by_min, cv::Scalar(0, 0, 255));      // 红色: 预警线/有效区 Y 下界
     h_line(src, cfg.by_max, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 上界
     h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 提前结算线
-    // VS原始代码：
-    // cv::line(src, cv::Point(cfg.cx_min, 0), cv::Point(cfg.cx_min, src.rows - 1),
-    //          cv::Scalar(0, 255, 255), 1);
-    // cv::line(src, cv::Point(cfg.cx_max, 0), cv::Point(cfg.cx_max, src.rows - 1),
-    //          cv::Scalar(0, 255, 255), 1);
-    // VS修改：改用 bres_line（Bresenham 算法，与 zgc_draw_tool.cpp dbg_line 一致）
-    bres_line(src, cfg.cx_min, 0, cfg.cx_min, src.rows - 1, cv::Scalar(0, 255, 255));
-    bres_line(src, cfg.cx_max, 0, cfg.cx_max, src.rows - 1, cv::Scalar(0, 255, 255));
+    const int mode = cx_limit_mode.load(std::memory_order_relaxed);
+    if (mode != VS_CX_LIMIT_RIGHT_ONLY)
+        bres_line(src, cfg.cx_min, 0, cfg.cx_min, src.rows - 1, cv::Scalar(0, 255, 255));
+    if (mode != VS_CX_LIMIT_LEFT_ONLY)
+        bres_line(src, cfg.cx_max, 0, cfg.cx_max, src.rows - 1, cv::Scalar(0, 255, 255));
 }
 
 // ===================================================================
@@ -699,6 +1055,14 @@ void VSInference::bgr_to_rgb565(cv::Mat &src)
 // 结果查询接口
 // ===================================================================
 bool VSInference::has_new_result() const { return result_ready; }
+bool VSInference::has_red_warning() const
+{
+    return red_warning.load(std::memory_order_acquire);
+}
+bool VSInference::consume_red_warning()
+{
+    return red_warning.exchange(false, std::memory_order_acq_rel);
+}
 bool VSInference::consume_new_result(std::string &result)
 {
     if (!result_ready)

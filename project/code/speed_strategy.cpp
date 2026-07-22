@@ -18,7 +18,7 @@ TrackInfo g_track_info;
      float k_speed_curve = 105.0f;
      float k_speed_sharp = 95.0f;
      float k_speed_obstacle_avoid = 40.0f;//绕行
-     float k_speed_circle = 105.0f;
+     float k_speed_circle = 110.0f;
      float k_speed_lost = 95.0f;
 
     //  float k_speed_straight = 170.0f; //716
@@ -54,7 +54,7 @@ TrackInfo g_track_info;
  // deviation 现在是 pure pursuit 的 alpha 角度，不是历史归一化横偏。
  float k_large_alpha_slowdown_deg = 25.0f; // 角度误差过大时的强制降速幅度（不考虑场景，仅按角度误差单因素调整速度）
 
- float base_start_speed = 130.0f;
+ float base_start_speed = 40.0f;
  float calc_base_speed(const TrackInfo &info)
  {
 

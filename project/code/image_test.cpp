@@ -221,14 +221,6 @@ int Both_Lost_Time = 0;//两边同时丢线数
 int point_mode =0; //0突变找点 1向量法找点
 TestMidlineMode g_test_midline_mode = TestMidlineMode::Auto;
 ReliableEdgeMode g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
-namespace
-{
-std::mutex g_obstacle_avoid_mutex;
-ObstacleAvoidDirection g_obstacle_avoid_direction = ObstacleAvoidDirection::None;
-MonotonicEventTimer g_obstacle_avoid_timer;
-// 更改绕行时间时只需调整此处。
-constexpr auto k_obstacle_avoid_duration = std::chrono::milliseconds(2000);//绕行时间
-}
 
 uint8 My_Offine=0;
 
@@ -347,62 +339,6 @@ void cycle_ipm_reliable_edge_mode(void)
         g_ipm_reliable_edge_mode = ReliableEdgeMode::Auto;
     }
 }
-// 触发绕行：设置绕行方向和持续时间，实际中线调整在 update_track_lines() 中根据这个状态进行。
-void trigger_obstacle_avoid(ObstacleAvoidDirection direction)
-{
-    if (direction == ObstacleAvoidDirection::None)
-    {
-        return;
-    }
-
-    // 当前试车方案：直接把选中的边线当临时中线使用，持续时间由
-    // k_obstacle_avoid_duration 统一配置。重复触发会从当前时刻重新计时。
-    // 绕行偏移当前为 -5.0 px，需结合实车轨迹继续标定。
-    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
-    g_obstacle_avoid_timer.start();
-    g_obstacle_avoid_direction = direction;
-    g_ipm_midline_offset_px.store(-5.0f);
-}
-
-void obstacle_avoid_timer_task(void)
-{
-    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
-    if (!g_obstacle_avoid_timer.expired(k_obstacle_avoid_duration))
-    {
-        return;
-    }
-
-    // 到期后只恢复选择策略和偏移量，不直接改任何中线点集。
-    g_obstacle_avoid_timer.reset();
-    g_obstacle_avoid_direction = ObstacleAvoidDirection::None;
-    g_ipm_midline_offset_px.store(k_ipm_default_midline_offset_px);
-}
-
-bool obstacle_avoid_active(void)
-{
-    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
-    return g_obstacle_avoid_direction != ObstacleAvoidDirection::None;
-}
-
-ObstacleAvoidDirection current_obstacle_avoid_direction(void)
-{
-    std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
-    return g_obstacle_avoid_direction;
-}
-
-const char *obstacle_avoid_direction_name(ObstacleAvoidDirection direction)
-{
-    switch (direction)
-    {
-    case ObstacleAvoidDirection::Left:
-        return "L";
-    case ObstacleAvoidDirection::Right:
-        return "R";
-    default:
-        return "-";
-    }
-}
-
 void cycle_debug_view_mode(void)
 {
     if (g_debug_view_mode == DebugViewMode::Composite)
@@ -719,15 +655,18 @@ ReliableEdgeMode selected_ipm_reliable_edge_mode(void)
 
 ReliableEdgeMode effective_ipm_reliable_edge_mode(void)
 {
-    // 绕行优先级最高：触发后先压过圆环/自动可靠边逻辑。
-    const ObstacleAvoidDirection avoid_direction = current_obstacle_avoid_direction();
-    if (avoid_direction == ObstacleAvoidDirection::Left)
+    // 只有状态 3 使用绕行边线；减速和定角转向阶段不依赖视觉控制。
+    if (obstacle_avoid_follow_edge_active())
     {
-        return ReliableEdgeMode::ForceLeft;
-    }
-    if (avoid_direction == ObstacleAvoidDirection::Right)
-    {
-        return ReliableEdgeMode::ForceRight;
+        const ObstacleAvoidDirection avoid_direction = current_obstacle_avoid_direction();
+        if (avoid_direction == ObstacleAvoidDirection::Left)
+        {
+            return ReliableEdgeMode::ForceLeft;
+        }
+        if (avoid_direction == ObstacleAvoidDirection::Right)
+        {
+            return ReliableEdgeMode::ForceRight;
+        }
     }
 
     if (Image_Flag.Left_Circle)
@@ -1123,8 +1062,10 @@ void build_ipm_midline(ReliableEdgeMode mode)
     {
         reliable_edge_mode = selected_ipm_reliable_edge_mode();
     }
-    // offset_px 是“可靠边 -> 临时中线”的法向偏移。绕行时可被运行时改成 0。
-    const float offset_px = g_ipm_midline_offset_px.load();
+    // 状态 3 沿用原绕行偏移；普通场景仍使用可在线修改的全局偏移。
+    const float offset_px = obstacle_avoid_follow_edge_active()
+                                ? obstacle_avoid_edge_midline_offset_px()
+                                : g_ipm_midline_offset_px.load();
 
     if (reliable_edge_mode == ReliableEdgeMode::ForceLeft)
     {
@@ -4938,12 +4879,29 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
     const uint16 state_color = debug_color(RGB565_PURPLE);
     const uint16 empty_color = debug_color(RGB565_GRAY);
     const uint16 avoid_color = debug_color(RGB565_RED);
+    const uint16 telemetry_color = debug_color(RGB565_YELLOW);
 
     dbg_fill_rect(img, x, y, x + w - 1, y + h - 1, bg_color);
 
     char scene_text[16] = {0};
     std::snprintf(scene_text, sizeof(scene_text), "SCN:%s", debug_track_scene_short_name(Control_Ipm_Debug_Scene));
     dbg_text_3x5(img, x + 2, y + 2, scene_text, text_color, bg_color, true);
+
+    // 原左下角的可靠边和帧率移到右上角第二列。
+    const char *edge_text = "REL:R";
+    if (Control_Ipm_Debug_Scene == TrackScene::LostLine)
+    {
+        edge_text = "REL:BOTH";
+    }
+    else if (debug_effective_selected_edge() == ReliableEdgeMode::ForceLeft)
+    {
+        edge_text = "REL:L";
+    }
+    dbg_text_3x5(img, x + 44, y + 2, edge_text, telemetry_color, bg_color, true);
+
+    char fps_text[16] = {0};
+    std::snprintf(fps_text, sizeof(fps_text), "FPS:%4.1f", g_fps_value);
+    dbg_text_3x5(img, x + 44, y + 9, fps_text, telemetry_color, bg_color, true);
 
     if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)
     {
@@ -4966,58 +4924,53 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
         dbg_text_3x5(img, x + 2, y + 43, "FLOS", lost_color, bg_color, true);
     }
 
-    // 右上状态区在发生绕行时显示绕行方向。
+    // 右上状态区同时显示绕行方向和状态编号，便于实车确认状态 1/2 的切换。
     if (obstacle_avoid_active())
     {
+        const ObstacleAvoidControl avoid = obstacle_avoid_snapshot();
         char avoid_text[12] = {0};
         std::snprintf(avoid_text,
                       sizeof(avoid_text),
-                      "AVD:%s",
-                      obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
+                      "AVD:%s%u",
+                      obstacle_avoid_direction_name(avoid.direction),
+                      static_cast<unsigned>(avoid.state));
         dbg_text_3x5(img, x + 2, y + 50, avoid_text, avoid_color, bg_color, true);
     }
 }
 
-void draw_composite_reliable_edge_panel(uint16 (*img)[image_width], int x, int y, int w, int h)
+void draw_composite_control_telemetry_panel(uint16 (*img)[image_width], int x, int y, int w, int h)
 {
     const uint16 bg_color = debug_color(RGB565_BLACK);
     const uint16 text_color = debug_color(RGB565_YELLOW);
 
     dbg_fill_rect(img, x, y, x + w - 1, y + h - 1, bg_color);
 
-    const char *edge_text = "REL:R";
-    if (Control_Ipm_Debug_Scene == TrackScene::LostLine)
-    {
-        edge_text = "REL:BOTH";
-    }
-    else if (debug_effective_selected_edge() == ReliableEdgeMode::ForceLeft)
-    {
-        edge_text = "REL:L";
-    }
-
-    dbg_text_3x5(img, x + 2, y + 2, edge_text, text_color, bg_color, true);
-
-    char offset_text[16] = {0};
-    std::snprintf(offset_text, sizeof(offset_text), "OFF:%4.1f", g_ipm_midline_offset_px.load());
-    dbg_text_3x5(img, x + 2, y + 11, offset_text, text_color, bg_color, true);
-
-    // 左下状态区显示当前图像处理帧率。
-    char fps_text[16] = {0};
-    std::snprintf(fps_text, sizeof(fps_text), "FPS:%4.1f", g_fps_value);
-    dbg_text_3x5(img, x + 2, y + 20, fps_text, text_color, bg_color, true);
-
-    // Line_Error 是 pure pursuit 最终发布的 alpha 角，单位为度。
-    char alpha_text[16] = {0};
-    std::snprintf(alpha_text, sizeof(alpha_text), "ALP:%+.1f", Line_Error);
-    dbg_text_3x5(img, x + 2, y + 29, alpha_text, text_color, bg_color, true);
-
+    // 10 项数据来自同一个 10 ms 控制周期，6px 行距刚好填满 80x60 区域。
     const WheelControlTelemetry wheel = wheel_control_telemetry_snapshot();
-    char left_pwm_text[16] = {0};
-    char right_pwm_text[16] = {0};
-    std::snprintf(left_pwm_text, sizeof(left_pwm_text), "PL:%+.1f", wheel.left_pwm);
-    std::snprintf(right_pwm_text, sizeof(right_pwm_text), "PR:%+.1f", wheel.right_pwm);
-    dbg_text_3x5(img, x + 2, y + 38, left_pwm_text, text_color, bg_color, true);
-    dbg_text_3x5(img, x + 2, y + 47, right_pwm_text, text_color, bg_color, true);
+    int text_y = y + 1;
+    auto draw_float = [&](const char *label, float value) {
+        char line[20] = {0};
+        std::snprintf(line, sizeof(line), "%s:%+.1f", label, value);
+        dbg_text_3x5(img, x + 1, text_y, line, text_color, bg_color, true);
+        text_y += 6;
+    };
+
+    draw_float("YAW", wheel.yaw);
+    draw_float("TYAW", wheel.target_yaw);
+    draw_float("STEER", wheel.steer);
+    draw_float("TSL", wheel.target_speed_l);
+    draw_float("TSR", wheel.target_speed_r);
+    draw_float("SPD1", wheel.left_speed);
+    draw_float("SPD2", wheel.right_speed);
+    draw_float("PWM1", wheel.left_pwm);
+    draw_float("PWM2", wheel.right_pwm);
+
+    char entry_text[16] = {0};
+    std::snprintf(entry_text,
+                  sizeof(entry_text),
+                  "ENTRY:%u",
+                  wheel.obstacle_entry_active ? 1U : 0U);
+    dbg_text_3x5(img, x + 1, text_y, entry_text, text_color, bg_color, true);
 }
 
 void build_composite_debug_image(uint16 (*img)[image_width], bool show_binary)
@@ -5033,7 +4986,7 @@ void build_composite_debug_image(uint16 (*img)[image_width], bool show_binary)
 
     draw_composite_normal_view(img, 0, 0, k_composite_view_w, k_composite_view_h, show_binary);
     draw_composite_status_panel(img, 80, 0, 80, 60);
-    draw_composite_reliable_edge_panel(img, 0, 60, 80, 60);
+    draw_composite_control_telemetry_panel(img, 0, 60, 80, 60);
     draw_composite_ipm_view(img, 80, 60, k_composite_view_w, k_composite_view_h);
 }
 
@@ -5304,15 +5257,20 @@ void build_ipm_lines_debug_image(uint16 (*img)[image_width])
     dbg_text_6x8(img, 2, 10, debug_text, extended_mid_color, bg_color, false);
 
     char offset_text[24] = {0};
-    std::snprintf(offset_text, sizeof(offset_text), "OFF:%4.1f", g_ipm_midline_offset_px.load());
+    const float displayed_offset = obstacle_avoid_follow_edge_active()
+                                       ? obstacle_avoid_edge_midline_offset_px()
+                                       : g_ipm_midline_offset_px.load();
+    std::snprintf(offset_text, sizeof(offset_text), "OFF:%4.1f", displayed_offset);
     dbg_text_6x8(img, 2, 20, offset_text, debug_color(RGB565_PURPLE), bg_color, false);
     if (obstacle_avoid_active())
     {
+        const ObstacleAvoidControl avoid = obstacle_avoid_snapshot();
         char avoid_text[16] = {0};
         std::snprintf(avoid_text,
                       sizeof(avoid_text),
-                      "AVD:%s",
-                      obstacle_avoid_direction_name(current_obstacle_avoid_direction()));
+                      "AVD:%s%u",
+                      obstacle_avoid_direction_name(avoid.direction),
+                      static_cast<unsigned>(avoid.state));
         dbg_text_6x8(img, 2, 30, avoid_text, debug_color(RGB565_RED), bg_color, false);
     }
     if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)

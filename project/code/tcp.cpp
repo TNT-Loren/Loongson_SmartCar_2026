@@ -5,7 +5,7 @@
 #include <cstring>
 
 #define TCP_IMAGE_SOURCE_TRACK 0
-#define TCP_IMAGE_SOURCE_VS    1   //lgy
+#define TCP_IMAGE_SOURCE_VS 1 // lgy
 
 // 图传矩阵选择：巡线使用 TRACK，队友推理使用 VS。
 #define TCP_IMAGE_SOURCE 0
@@ -69,8 +69,6 @@ bool tcp_debug_init(const char *ip, int port)
     }
 }
 
-
-
 /**
  * @brief  图传初始化
  * @param  ip   电脑 IP 地址
@@ -105,17 +103,13 @@ bool tcp_image_transmission_init(const char *ip, int port)
         printf("TCP Client Error. 检查 IP 或网络!\n");
         return false;
     }
-
 }
 
-// VS模式生成彩色ROI；没有有效ROI时生成完整彩色调试图。巡线模式下为空操作。
+// VS模式固定生成完整彩色调试图。巡线模式下为空操作。
 void tcp_camera_update_vs_image(void)
 {
 #if TCP_IMAGE_SOURCE == TCP_IMAGE_SOURCE_VS
-    if (!g_vs.build_color_block_roi_image())
-    {
-        g_vs.build_color_debug_image();
-    }
+    g_vs.build_color_debug_image();
 #endif
 }
 
@@ -128,7 +122,7 @@ void tcp_camera_snapshot_debug_image(void)
 #endif
 }
 
-//读取故障状态的同时把它清零
+// 读取故障状态的同时把它清零
 bool tcp_camera_send_failed(void)
 {
     return g_tcp_camera_send_failed.exchange(false);

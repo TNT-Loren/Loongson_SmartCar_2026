@@ -839,7 +839,7 @@ void update_control_target(void)
 
     TrackScene scene = TrackScene::Straight;
     const float abs_legacy_deviation = std::fabs(legacy_deviation);
-    if (obstacle_avoid_active())
+    if (obstacle_avoid_follow_edge_active())
     {
         // Obstacle avoidance has its own speed and preview tuning.
         scene = TrackScene::ObstacleAvoid;

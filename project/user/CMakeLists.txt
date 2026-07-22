@@ -78,6 +78,7 @@ link_directories(
 # 业务源文件
 aux_source_directory(../user DIR_SRCS)
 aux_source_directory(../code DIR_SRCS)
+aux_source_directory(../code/obstacle_avoid DIR_SRCS)
 aux_source_directory(../code/Control/Control_Source DIR_SRCS) # <--- 必须添加这一行
 aux_source_directory(../code/Control/Menu DIR_SRCS)           # <--- 如果Menu里有.cpp也加上
 aux_source_directory(../code/VSTAB_module/VSTAB_Soure DIR_SRCS) # <--- 如果需要红点识别功能也加上

@@ -1,6 +1,7 @@
 #include "scheduler.hpp"
 #include "beep.hpp"
 #include "common_MYmenu.hpp"
+#include "obstacle_avoid/obstacle_avoid_fsm.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -22,27 +23,6 @@ constexpr float k_speed_tuning_gain_max = 20.0f;
 constexpr float k_angle_tuning_target_limit_deg = 180.0f;
 constexpr float k_angle_tuning_steer_limit = 30.0f;
 //////////////////////////////////////////////////
-// 绕行第一阶段：锁存一个相对目标航向，达到目标后立即回到原绕行控制。
-// 这里不再增加独立的固定退出时间，绕行总时长仍由 image_test.cpp 的 2 秒事件计时器控制。
-constexpr float k_obstacle_entry_relative_yaw_deg = 45.0f;
-constexpr float k_obstacle_entry_base_speed = 10.0f;
-// 当前沿用实车调试得到的第一阶段角度输出上限；它不是目标角度。
-constexpr float k_obstacle_entry_steer_limit = 60.0f;
-constexpr float k_obstacle_entry_yaw_tolerance_deg = 2.0f;
-
-float wrap_to_180_scheduler(float angle)
-{
-    while (angle > 180.0f)
-    {
-        angle -= 360.0f;
-    }
-    while (angle <= -180.0f)
-    {
-        angle += 360.0f;
-    }
-    return angle;
-}
-
 static_assert(!(k_speed_pid_tuning_mode && k_angle_pid_tuning_mode),
               "Only one PID tuning mode can be enabled");
 }
@@ -58,11 +38,6 @@ std::atomic<uint8_t> need_print(0);
 static uint32_t tick_5ms = 0;
 static auto last_time = std::chrono::steady_clock::now(); // 调度器专属的单调时间戳
 static float dt_sum_10ms = 0.0f;
-// 只记录第一阶段是否仍在执行、进入时的目标方向和锁存目标 yaw。
-// 不改变 image_test.cpp 的原绕行计时；绕行 2 秒到期仍由原逻辑结束。
-static bool obstacle_entry_control_active = false;
-static ObstacleAvoidDirection obstacle_entry_direction = ObstacleAvoidDirection::None;
-static float obstacle_entry_target_yaw = 0.0f;
 
 
 //===================================下面设置为全局变量，为了方便 TCP 线程访问和调试
@@ -73,27 +48,67 @@ float pwm_r = 0.0f;
 
 namespace
 {
+std::atomic<std::uint32_t> g_telemetry_sequence{0};
+std::atomic<float> g_telemetry_yaw{0.0f};
+std::atomic<float> g_telemetry_target_yaw{0.0f};
+std::atomic<float> g_telemetry_steer{0.0f};
+std::atomic<float> g_telemetry_target_speed_l{0.0f};
+std::atomic<float> g_telemetry_target_speed_r{0.0f};
 std::atomic<float> g_telemetry_left_speed{0.0f};
 std::atomic<float> g_telemetry_right_speed{0.0f};
 std::atomic<float> g_telemetry_left_pwm{0.0f};
 std::atomic<float> g_telemetry_right_pwm{0.0f};
+std::atomic<bool> g_telemetry_obstacle_entry_active{false};
 
-void publish_wheel_control_telemetry()
+void publish_wheel_control_telemetry(float steer,
+                                     float target_speed_l,
+                                     float target_speed_r,
+                                     bool obstacle_entry_active)
 {
+    // 单写者序列锁保证图传读取到的是同一个 10 ms 控制周期，而不是跨周期混合值。
+    g_telemetry_sequence.fetch_add(1, std::memory_order_acq_rel);
+    g_telemetry_yaw.store(yaw, std::memory_order_relaxed);
+    g_telemetry_target_yaw.store(target_yaw, std::memory_order_relaxed);
+    g_telemetry_steer.store(steer, std::memory_order_relaxed);
+    g_telemetry_target_speed_l.store(target_speed_l, std::memory_order_relaxed);
+    g_telemetry_target_speed_r.store(target_speed_r, std::memory_order_relaxed);
     g_telemetry_left_speed.store(speed1, std::memory_order_relaxed);
     g_telemetry_right_speed.store(speed2, std::memory_order_relaxed);
     g_telemetry_left_pwm.store(pwm_l, std::memory_order_relaxed);
     g_telemetry_right_pwm.store(pwm_r, std::memory_order_relaxed);
+    g_telemetry_obstacle_entry_active.store(obstacle_entry_active, std::memory_order_relaxed);
+    g_telemetry_sequence.fetch_add(1, std::memory_order_release);
 }
 }
 
 WheelControlTelemetry wheel_control_telemetry_snapshot()
 {
     WheelControlTelemetry telemetry;
-    telemetry.left_speed = g_telemetry_left_speed.load(std::memory_order_relaxed);
-    telemetry.right_speed = g_telemetry_right_speed.load(std::memory_order_relaxed);
-    telemetry.left_pwm = g_telemetry_left_pwm.load(std::memory_order_relaxed);
-    telemetry.right_pwm = g_telemetry_right_pwm.load(std::memory_order_relaxed);
+    std::uint32_t sequence_before = 0;
+    std::uint32_t sequence_after = 0;
+    do
+    {
+        sequence_before = g_telemetry_sequence.load(std::memory_order_acquire);
+        if ((sequence_before & 1U) != 0U)
+        {
+            continue;
+        }
+
+        telemetry.yaw = g_telemetry_yaw.load(std::memory_order_relaxed);
+        telemetry.target_yaw = g_telemetry_target_yaw.load(std::memory_order_relaxed);
+        telemetry.steer = g_telemetry_steer.load(std::memory_order_relaxed);
+        telemetry.target_speed_l = g_telemetry_target_speed_l.load(std::memory_order_relaxed);
+        telemetry.target_speed_r = g_telemetry_target_speed_r.load(std::memory_order_relaxed);
+        telemetry.left_speed = g_telemetry_left_speed.load(std::memory_order_relaxed);
+        telemetry.right_speed = g_telemetry_right_speed.load(std::memory_order_relaxed);
+        telemetry.left_pwm = g_telemetry_left_pwm.load(std::memory_order_relaxed);
+        telemetry.right_pwm = g_telemetry_right_pwm.load(std::memory_order_relaxed);
+        telemetry.obstacle_entry_active =
+            g_telemetry_obstacle_entry_active.load(std::memory_order_relaxed);
+        sequence_after = g_telemetry_sequence.load(std::memory_order_acquire);
+    }
+    while (sequence_before != sequence_after || (sequence_after & 1U) != 0U);
+
     return telemetry;
 }
 
@@ -104,39 +119,6 @@ void master_scheduler_callback()
     auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - last_time).count();
     last_time = now;
-
-    // 绕行总计时只需约 10ms 分辨率；每两个 5ms 调度周期查询一次即可。
-    // 编码器、IMU 和蜂鸣器任务仍保持 5ms 频率，不改变控制采样周期。
-    if (tick_5ms % 2 == 1)
-    {
-        obstacle_avoid_timer_task();
-    }
-
-    // 第一次看到绕行状态时锁存目标 yaw。目标基于触发瞬间的 yaw 计算，
-    // 不能每个周期都用“当前 yaw + 相对角度”，否则目标会跟着车辆移动。
-    const bool obstacle_active = obstacle_avoid_active();
-    const ObstacleAvoidDirection obstacle_direction = obstacle_active
-                                                       ? current_obstacle_avoid_direction()
-                                                       : ObstacleAvoidDirection::None;
-    if (obstacle_active && obstacle_direction != obstacle_entry_direction)
-    {
-        const float direction_sign =
-            obstacle_direction == ObstacleAvoidDirection::Right ? 1.0f : -1.0f;
-        obstacle_entry_direction = obstacle_direction;
-        obstacle_entry_control_active = true;
-        obstacle_entry_target_yaw = wrap_to_180_scheduler(
-            yaw + direction_sign * k_obstacle_entry_relative_yaw_deg);
-        // 原角度 PID 的历史误差不带入绕行结束后的第一次恢复计算。
-        pid_angle.clear();
-        pid_angle.suppress_derivative_once();
-    }
-    else if (!obstacle_active && obstacle_entry_direction != ObstacleAvoidDirection::None)
-    {
-        obstacle_entry_control_active = false;
-        obstacle_entry_direction = ObstacleAvoidDirection::None;
-        pid_angle.clear();
-        pid_angle.suppress_derivative_once();
-    }
 
     // 极短周期没有有效采样意义，直接忽略且不推进控制时间轴。
     if (dt <= 0.0001f)
@@ -183,7 +165,7 @@ void master_scheduler_callback()
                 pid_right.clear();
                 pid_angle.clear();
                 motor_set_speed(0, 0);
-                publish_wheel_control_telemetry();
+                publish_wheel_control_telemetry(0.0f, 0.0f, 0.0f, false);
                 return;
             }
         }
@@ -192,6 +174,8 @@ void master_scheduler_callback()
         // 三种模式最终都只发布左右轮目标速度，后面的速度内环保持完全一致。
         float target_speed_l = 0.0f;
         float target_speed_r = 0.0f;
+        float control_steer = 0.0f;
+        bool obstacle_entry_active = false;
         if constexpr (k_speed_pid_tuning_mode)
         {
             // 速度环调参：绕过视觉和角度环，两轮使用相同目标；滑块0/1/2=速度/Kp/Ki。
@@ -227,12 +211,12 @@ void master_scheduler_callback()
                 pid_angle.suppress_derivative_once();
             }
             first_tuning_cycle = false;
-            const float steer = pid_angle.calc(target_yaw,
-                                               yaw,
-                                               control_dt,
-                                               k_angle_tuning_steer_limit);
-            target_speed_l = target_speed + steer;
-            target_speed_r = target_speed - steer;
+            control_steer = pid_angle.calc(target_yaw,
+                                           yaw,
+                                           control_dt,
+                                           k_angle_tuning_steer_limit);
+            target_speed_l = target_speed + control_steer;
+            target_speed_r = target_speed - control_steer;
             last_tuning_target_yaw = target_yaw;
         }
         else
@@ -246,54 +230,69 @@ void master_scheduler_callback()
                 local_track_info = g_track_info;
             }
 
-            bool obstacle_entry_active = obstacle_entry_control_active;
-            if (obstacle_entry_active)
+            const ObstacleAvoidControl avoid = obstacle_avoid_update(yaw, speed1, speed2);
+            static std::uint32_t last_avoid_transition_sequence = 0;
+            if (avoid.transition_sequence != last_avoid_transition_sequence)
             {
-                const float yaw_error = wrap_to_180_scheduler(obstacle_entry_target_yaw - yaw);
-                if (std::fabs(yaw_error) <= k_obstacle_entry_yaw_tolerance_deg)
+                last_avoid_transition_sequence = avoid.transition_sequence;
+                // 每次切换控制来源都清除角度环历史，避免视觉目标和固定 yaw 相互带入。
+                pid_angle.clear();
+                pid_angle.suppress_derivative_once();
+
+                if (avoid.state == ObstacleAvoidState::Decelerate ||
+                    avoid.state == ObstacleAvoidState::TurnToRelativeYaw ||
+                    avoid.state == ObstacleAvoidState::FollowEdge ||
+                    avoid.state == ObstacleAvoidState::Cooldown)
                 {
-                    // 已达到第一阶段相对目标，立即交回原有绕行方案。
-                    obstacle_entry_control_active = false;
-                    obstacle_entry_active = false;
-                    pid_angle.clear();
-                    pid_angle.suppress_derivative_once();
-                    // 第一阶段只会进入一次，达到目标角时提示一次，不随后续控制周期重复响铃。
+                    // 进入制动、-90 切到 +30、定角转向和恢复巡线时，均不保留上一段速度环输出。
+                    pid_left.clear();
+                    pid_right.clear();
+                }
+                if (avoid.state == ObstacleAvoidState::FollowEdge)
+                {
                     Set_Beeptime(100);
                 }
             }
 
-            if (obstacle_entry_active)
+            if (avoid.state == ObstacleAvoidState::Decelerate)
             {
-                // 第一阶段使用锁存的相对目标，不等待新的 ALP/目标航向角。
-                // 正目标角表示右绕，负目标角表示左绕，符号与角度环调参一致。
-                const float obstacle_steer = pid_angle.calc(obstacle_entry_target_yaw,
-                                                            yaw,
-                                                            control_dt,
-                                                            k_obstacle_entry_steer_limit);
-                target_speed = k_obstacle_entry_base_speed;
-                target_yaw = obstacle_entry_target_yaw;
-                target_speed_l = std::max(0.0f,
-                                          k_obstacle_entry_base_speed + obstacle_steer);
-                target_speed_r = std::max(0.0f,
-                                          k_obstacle_entry_base_speed - obstacle_steer);
+                // 状态 1 始终直行：先用 -90 制动，达到阈值后由 FSM 切换为 +30 等待分类。
+                target_speed = avoid.target_speed;
+                target_yaw = yaw;
+                target_speed_l = avoid.target_speed;
+                target_speed_r = avoid.target_speed;
+                base_start_speed = avoid.target_speed;
+            }
+            else if (avoid.state == ObstacleAvoidState::TurnToRelativeYaw)
+            {
+                // 状态 2 使用进入本状态时锁存的绝对 yaw；正角右转，负角左转。
+                obstacle_entry_active = true;
+                control_steer = pid_angle.calc(avoid.target_yaw,
+                                               yaw,
+                                               control_dt,
+                                               avoid.steer_limit);
+                target_speed = avoid.target_speed;
+                target_yaw = avoid.target_yaw;
+                target_speed_l = std::max(0.0f, avoid.target_speed + control_steer);
+                target_speed_r = std::max(0.0f, avoid.target_speed - control_steer);
+                base_start_speed = avoid.target_speed;
             }
             else
             {
-                // 原有正式巡线/绕行控制完整保留：第一阶段达到目标后使用原方案。
-                // 速度策略输出基础轮速；角度 PID 输出同单位的单轮速度偏移 steer。
+                // 状态 3 使用现有视觉边线，状态 4/冷却/空闲均使用普通视觉中线。
                 const float base_speed = calc_base_speed(local_track_info);
                 target_speed = base_speed;
                 target_yaw = local_vision_target_yaw;
                 // 正式模式按基础速度动态限制转向权限，避免低速/弯道时差速过度。
                 constexpr float k_max_steer_ratio = 0.60f;
                 const float steer_limit = base_speed * k_max_steer_ratio;
-                const float steer = pid_angle.calc(local_vision_target_yaw,
-                                                   yaw,
-                                                   control_dt,
-                                                   steer_limit);
+                control_steer = pid_angle.calc(local_vision_target_yaw,
+                                               yaw,
+                                               control_dt,
+                                               steer_limit);
                 // 比赛模式不允许内轮倒转；正 steer 表示左轮加速、右轮减速，车辆向右转。
-                target_speed_l = std::max(0.0f, base_speed + steer);
-                target_speed_r = std::max(0.0f, base_speed - steer);
+                target_speed_l = std::max(0.0f, base_speed + control_steer);
+                target_speed_r = std::max(0.0f, base_speed - control_steer);
             }
         }
 
@@ -303,7 +302,10 @@ void master_scheduler_callback()
         pwm_l = std::clamp(pwm_l, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         pwm_r = std::clamp(pwm_r, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         motor_set_speed((int)pwm_l, (int)pwm_r);
-        publish_wheel_control_telemetry();
+        publish_wheel_control_telemetry(control_steer,
+                                        target_speed_l,
+                                        target_speed_r,
+                                        obstacle_entry_active);
     }
 
     // 约 1 秒发布一次低频状态标志；tick 不清零，保持调度时间轴连续。

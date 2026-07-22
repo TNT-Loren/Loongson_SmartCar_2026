@@ -3,6 +3,7 @@
 
 #include "zf_common_headfile.hpp"
 #include "image_size.hpp"
+#include "obstacle_avoid/obstacle_avoid_fsm.hpp"
 #include <atomic>
 #include <mutex>
 
@@ -158,13 +159,6 @@ enum class ReliableEdgeMode : uint8_t
     ForceRight = 2  // 手动强制右边为可靠边
 };
 
-enum class ObstacleAvoidDirection : uint8_t
-{
-    None = 0,
-    Left = 1,  // 强制左边线作为临时中线参考
-    Right = 2  // 强制右边线作为临时中线参考
-};
-
 enum class IpmMidlineScene : uint8_t
 {
     Invalid = 0,     // 点数或可见长度不足，暂不可信
@@ -227,11 +221,6 @@ void cycle_test_midline_mode(void);                            // 键盘调试�
 const char *test_midline_mode_name(TestMidlineMode mode);      // 返回测试中线模式名
 void cycle_ipm_reliable_edge_mode(void);                       // 键盘调试：切换IPM可靠边选择模式
 const char *reliable_edge_mode_name(ReliableEdgeMode mode);    // 返回IPM可靠边模式名
-void trigger_obstacle_avoid(ObstacleAvoidDirection direction);  // 触发定时绕行：Left=左边线为临时中线，Right=右边线为临时中线
-void obstacle_avoid_timer_task(void);                           // 查询单调事件计时器，到期后恢复正常 IPM 偏移
-bool obstacle_avoid_active(void);                               // 当前是否处于绕行状态
-ObstacleAvoidDirection current_obstacle_avoid_direction(void);  // 当前绕行方向
-const char *obstacle_avoid_direction_name(ObstacleAvoidDirection direction);
 void cycle_debug_view_mode(void);                              // 键盘调试：切换普通图传/IPM边线图
 const char *debug_view_mode_name(void);                        // 返回当前图传显示模式名
 IpmMidlineSceneResult classify_ipm_midline_scene(const uint16 points[MT9V03X_H][2],

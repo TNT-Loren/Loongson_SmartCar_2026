@@ -17,13 +17,19 @@ extern float pwm_r; // 声明一个全局变量，用于存储右轮 PWM 输出
 
 struct WheelControlTelemetry
 {
+    float yaw = 0.0f;
+    float target_yaw = 0.0f;
+    float steer = 0.0f;
+    float target_speed_l = 0.0f;
+    float target_speed_r = 0.0f;
     float left_speed = 0.0f;
     float right_speed = 0.0f;
     float left_pwm = 0.0f;
     float right_pwm = 0.0f;
+    bool obstacle_entry_active = false;
 };
 
-// 返回调度线程最近一次发布的实际轮速和最终 PWM，供低频调试输出使用。
+// 返回调度线程最近一次完整发布的控制快照，供低频打印和图传使用。
 WheelControlTelemetry wheel_control_telemetry_snapshot();
 
 // 暴露出调度器初始化接口

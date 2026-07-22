@@ -1,19 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <map>
 #include "zf_common_headfile.hpp"
-
-/*
-  更新日志：
-  1、增加提前结算功能，有效解决了急救包的BUG
-  2、新增新模型，识别成功率更高
-  3、将所有使能接口修改为预编译，降低CPU开销
-  4、优化了划线部分，使得当外部关闭图传的时候划线开销为0
-
-  未来目标，尝试融合fp16格式模型，增快识别速度
-*/
 
 // ===================================================================
 // VS 调参区：只改这里。坐标基于 320x240 彩色图。
@@ -21,23 +12,36 @@
 // 开关：0=关闭，1=开启
 #define VS_ENABLE_TERMINAL_OUTPUT (0) // 终端打印详细识别日志
 #define VS_ENABLE_GUIDELINES (0)      // VS 彩色调试图中绘制辅助线
-#define VS_ENABLE_ZONE_AREA_MAX (0)   // 上半区独立面积上限；当前不启用
 
 // 色块检测：先 HSV 找红色目标，再用 box 框出模型输入 ROI。
-#define VS_HSV_SCALE (4)       // HSV降采样：1=320x240，2=160x120，4=80x60
+#define VS_COLOR_DETECT_Y_MAX (120) // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算
+#define VS_HSV_SCALE (4)            // HSV降采样倍率；默认裁剪后约为80x31
+#define VS_ENABLE_RED_MASK_CLOSE (1) // 连接降采样后相邻的红色色块，避免缩放造成轮廓断裂
+#define VS_RED_CLOSE_KERNEL_SIZE_PX (12) // 闭运算核边长，单位为320x240原图px；内部自动换算
+#define VS_RED_CLOSE_ITERATIONS (1)  // 闭运算次数；过大会把原本独立的目标合并
 #define VS_BOX_SIZE (64)       // 绿色检测框大小；必须与 NCNN 输入尺寸一致
 #define VS_BOX_Y_OFFSET_PX (5) // 检测框Y偏移：正=下移，负=上移，单位px
-#define VS_AREA_MIN (24)       // 色块最小面积，过滤噪点，单位px^2
-#define VS_AREA_MAX (450)      // 下半区/有效区色块最大面积
-#define VS_ZONE_END_Y (50)     // 上下分区边界Y坐标
-#define VS_ZONE_AREA_MAX (300) // 上半区面积上限，用于抑制远端干扰
+#define VS_AREA_MIN (24)       // 色块最小面积，单位为320x240原图px^2
+#define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
+
+// 红色色块预警区：[0, VS_BY_MIN)，与模型有效区共用同一条边界线。
+#define VS_WARNING_AREA_MIN (20) // 预警红色色块最小面积，单位为320x240原图px^2
+#define VS_WARNING_AREA_MAX (60) // 预警红色色块最大面积，单位为320x240原图px^2
+#define VS_WARNING_CLEAR_FRAMES (6) // 连续多少帧完全无目标后，才允许下一次预警
 
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
+#define VS_CX_LIMIT_BOTH (0)       // 同时限制 CX_MIN 和 CX_MAX
+#define VS_CX_LIMIT_LEFT_ONLY (1)  // 只限制左侧 CX_MIN
+#define VS_CX_LIMIT_RIGHT_ONLY (2) // 只限制右侧 CX_MAX
+#define VS_CX_LIMIT_MODE (0)       // 初始模式：0=两侧，1=仅左侧，2=仅右侧
+#if VS_CX_LIMIT_MODE < VS_CX_LIMIT_BOTH || VS_CX_LIMIT_MODE > VS_CX_LIMIT_RIGHT_ONLY
+#error "VS_CX_LIMIT_MODE must be 0, 1 or 2"
+#endif
 #define VS_CX_MIN (60)      // 底部中心X下限
 #define VS_CX_MAX (260)     // 底部中心X上限
-#define VS_BY_MIN (60)      // 底部中心Y下限；也是权重LUT归一化起点
-#define VS_BY_MAX (90)     // LUT归一化终点；超过后继续使用最大权重
-#define VS_FINALIZE_Y (106) // 提前结算线
+#define VS_BY_MIN (50)      // 底部中心Y下限；也是权重LUT归一化起点
+#define VS_BY_MAX (80)     // LUT归一化终点；超过后继续使用最大权重
+#define VS_FINALIZE_Y (90) // 提前结算线
 
 // HSV 红色双区间阈值：OpenCV HSV中红色跨 0/179，需要两段合并。
 #define VS_HSV1_LOW 0, 150, 100
@@ -46,8 +50,8 @@
 #define VS_HSV2_HIGH 179, 255, 255
 
 // 跟踪与输出：目标触及提前结算线或离开有效区后，输出一次累计投票结果。
-#define VS_LOST_FRAMES (3)           // 连续丢失多少帧后确认目标离开
-#define VS_MIN_TRACK (3)             // 至少跟踪多少帧才认为结果有效
+#define VS_LOST_FRAMES (2)           // 连续丢失多少帧后确认目标离开
+#define VS_MIN_TRACK (2)             // 至少跟踪多少帧才认为结果有效
 #define VS_RESULT_COOLDOWN_MS (2000) // 两次最终结果输出之间的冷却时间，单位ms
 #define VS_EXP_ALPHA (2.5f)          // Y方向指数权重；越大越偏向近处目标
 
@@ -59,34 +63,36 @@
 // #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
 // 激进模型1，速度未对比，测试的时候效果比第1次的好
-#define VS_MODEL_PARAM_PATH        "falsh_tiny_classifier_fp32.ncnn.param"
-#define VS_MODEL_BIN_PATH          "falsh_tiny_classifier_fp32.ncnn.bin"
-#define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
-#define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
+// #define VS_MODEL_PARAM_PATH        "falsh_tiny_classifier_fp32.ncnn.param"
+// #define VS_MODEL_BIN_PATH          "falsh_tiny_classifier_fp32.ncnn.bin"
+// #define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
+// #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
 // 激进模型2，速度未对比，测试的时候效果比第2次的好
-// #define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
-// #define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
-// #define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
-// #define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
+#define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
+#define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
+#define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
+#define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
 
 // ===================================================================
 // VSConfig：运行时配置镜像。默认值全部来自上方宏，通常只改“VS 调参区”。
 // ===================================================================
 struct VSConfig
 {
+    int color_detect_y_max = VS_COLOR_DETECT_Y_MAX;
     int hsv_scale = VS_HSV_SCALE;
+    int red_close_kernel_size_px = VS_RED_CLOSE_KERNEL_SIZE_PX;
+    int red_close_iterations = VS_RED_CLOSE_ITERATIONS;
     int box_size = VS_BOX_SIZE;
     int box_y_offset = VS_BOX_Y_OFFSET_PX;
     int area_min = VS_AREA_MIN;
     int area_max = VS_AREA_MAX;
-#if VS_ENABLE_ZONE_AREA_MAX
-    int zone_end_y = VS_ZONE_END_Y;
-    int zone_area_max = VS_ZONE_AREA_MAX;
-#endif
 
     int cx_min = VS_CX_MIN;
     int cx_max = VS_CX_MAX;
+    int warning_area_min = VS_WARNING_AREA_MIN;
+    int warning_area_max = VS_WARNING_AREA_MAX;
+    int warning_clear_frames = VS_WARNING_CLEAR_FRAMES;
     int by_min = VS_BY_MIN;
     int by_max = VS_BY_MAX;
     int finalize_y = VS_FINALIZE_Y;
@@ -122,7 +128,7 @@ public:
     VSConfig cfg; // 所有可调参数（init 前修改）
 
     // ---- 输出缓冲区（tick() 后更新，上层负责发送） ----
-    uint16_t image_copy[UVC_HEIGHT][UVC_WIDTH];
+    uint16_t image_copy[UVC_HEIGHT][UVC_WIDTH] = {};
 
     // ---- 生命周期 ----
     // 初始化摄像头和 NCNN 模型，返回 true 成功
@@ -134,6 +140,11 @@ public:
 
     // 设置外部摄像头（共享已有 uvc_dev，避免重复 open /dev/video0）
     void set_external_camera(void *ext_uvc);
+
+    // 运行时X限幅模式：0=左右限幅，1=只限左侧，2=只限右侧。
+    // 可在其他cpp中通过 g_vs.set_cx_limit_mode(mode) 随时切换。
+    bool set_cx_limit_mode(int mode);
+    int get_cx_limit_mode() const;
 
     // tick() — 单帧处理（内部 wait + RGB565 解码），返回 false 表示摄像头采集失败
     bool tick();
@@ -149,9 +160,15 @@ public:
     // 包含色块绿色框和辅助线；返回 false 表示当前没有可用彩色帧。
     bool build_color_debug_image();
 
+    // 键盘调参视图：完整彩色图 <-> 红色阈值有效区。
+    void cycle_color_debug_view();
+    const char *get_color_debug_view_name() const;
+
     // ---- 上层获取最终推理结果（触及结算线或离开有效区后输出一次） ----
     bool has_new_result() const;                  // 是否有新的最终结果待读取
     bool consume_new_result(std::string &result); // 读取、打印并清除一次最终结果
+    bool has_red_warning() const;                 // 是否有一次预警事件待读取
+    bool consume_red_warning();                   // 读取并清除一次预警事件
     std::string get_label() const;                // 原始推理标签，如 "急救包" / "救护车" / "枪械"
     std::string get_result() const;               // 分类结果，如 "物资" / "载具" / "武器"
     std::string get_category() const;             // 分类结果（同 get_result）
@@ -171,19 +188,39 @@ private:
     void *uvc_dev = nullptr;     // UVC 摄像头（内部创建，ext_uvc_dev 为空时使用）
     void *ext_uvc_dev = nullptr; // 外部传入的摄像头（共享巡线的 uvc_dev）
     void *ncnn = nullptr;        // NCNN 推理引擎
+    bool initialized = false;    // init() 完整成功后才允许处理图像
 
     // ===== 图像缓冲区（预分配复用，避免每帧 malloc/free） =====
-    uint16_t *rgb_image = nullptr; // 摄像头原始 RGB565 指针
-    cv::Mat src;                   // BGR 工作图像 (UVC_WIDTH × UVC_HEIGHT × 3)
-    cv::Mat roi;                   // NCNN 推理 ROI  (box_size × box_size × 3)
-    cv::Mat src_small;             // HSV 降采样缓冲区（预分配复用）
-    cv::Mat tx_frame;              // 图传输出工作缓冲，避免每帧 clone/zeros 反复分配
-    int hsv_w = 0, hsv_h = 0;      // 降采样后宽高
+    uint16_t *rgb_image = nullptr;  // 摄像头原始 RGB565 指针
+    cv::Mat src;                    // BGR 工作图像 (UVC_WIDTH × UVC_HEIGHT × 3)
+    cv::Mat roi;                    // NCNN 推理 ROI  (box_size × box_size × 3)
+    cv::Mat src_small;              // HSV 降采样缓冲区（预分配复用）
+    cv::Mat tx_frame;               // 图传输出工作缓冲，避免每帧 clone/zeros 反复分配
+    cv::Mat red_debug_warning_mask; // 调参视图中的有效预警掩码（按需分配）
+    cv::Mat red_debug_normal_mask;  // 调参视图中的有效检测掩码（按需分配）
+    cv::Mat red_debug_full_mask;    // 调参视图的原分辨率掩码（按需分配）
+    int detect_h = 0;               // 参与色域计算的原图高度
+    int hsv_w = 0, hsv_h = 0;       // 降采样后宽高
+    bool red_tuning_view = false;   // false=完整彩色图，true=红色阈值调参图
 
     // ===== 色块检测中间变量 =====
     cv::Mat hsv, mask1, mask2, mask;
+    cv::Mat red_component_labels;    // 缩小掩膜的连通域标签（CV_32S）
+    cv::Mat red_component_stats;     // 连通域包围框等统计结果
+    cv::Mat red_component_centroids; // OpenCV连通域接口输出，主逻辑不使用浮点中心
+    std::vector<int> red_component_areas; // 每个连通域映射到320x240后的实际像素面积
+    std::vector<int> hsv_x_pixel_weights; // 缩小图每列代表的原图像素宽度
+    std::vector<int> hsv_y_pixel_weights; // 缩小图每行代表的原图像素高度
+    cv::Rect red_component_roi;       // 当前帧局部补色/连通域区域（缩小图坐标）
+    int red_component_count = 1;     // 包含0号背景标签
+#if VS_ENABLE_RED_MASK_CLOSE
+    cv::Mat red_close_kernel;       // init时创建，运行时复用
+    int red_close_margin_x = 0;     // 保证局部闭运算结果与整图处理一致的外扩量
+    int red_close_margin_y = 0;
+#endif
     bool has_best = false;
     bool roi_valid = false;
+    int best_cx = -1;
     int best_by = -1;
 #if VS_ENABLE_TERMINAL_OUTPUT
     int best_area = 0;
@@ -219,6 +256,10 @@ private:
     bool result_ready = false;
     long long final_lost_ms = 0;
     int fps_count = 0;
+    std::atomic<bool> red_warning{false};
+    std::atomic<int> cx_limit_mode{VS_CX_LIMIT_MODE};
+    bool warning_armed = true;
+    int warning_clear_count = 0; // 空一帧不立即重触发，避免阈值边缘抖动产生连续预警
     std::chrono::steady_clock::time_point last_result_time = std::chrono::steady_clock::time_point::min();
 
     // ===== 内部方法 =====
@@ -226,6 +267,8 @@ private:
     void output_final(bool immediate = false);
     void draw_guidelines(cv::Mat &src);
     void bgr_to_rgb565(cv::Mat &src);
+    bool build_red_tuning_debug_image();
+    bool cx_is_valid(int cx, int mode) const;
 
     static std::string classify_label(const std::string &label);
 };
