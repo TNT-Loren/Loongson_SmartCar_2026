@@ -25,20 +25,18 @@
 #define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
 
 // 红色色块预警区：[0, VS_BY_MIN)，与模型有效区共用同一条边界线。
-#define VS_WARNING_AREA_MIN (20) // 预警红色色块最小面积，单位为320x240原图px^2
-#define VS_WARNING_AREA_MAX (60) // 预警红色色块最大面积，单位为320x240原图px^2
-#define VS_WARNING_CLEAR_FRAMES (6) // 连续多少帧完全无目标后，才允许下一次预警
+#define VS_WARNING_AREA_MIN (8) // 预警红色色块最小面积，单位为320x240原图px^2
+#define VS_WARNING_AREA_MAX (70) // 预警红色色块最大面积，单位为320x240原图px^2
 
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
-#define VS_CX_LIMIT_BOTH (0)       // 同时限制 CX_MIN 和 CX_MAX
-#define VS_CX_LIMIT_LEFT_ONLY (1)  // 只限制左侧 CX_MIN
-#define VS_CX_LIMIT_RIGHT_ONLY (2) // 只限制右侧 CX_MAX
+#define VS_CX_LIMIT_BOTH (0)       // 同时启用巡线左右边线限制
+#define VS_CX_LIMIT_LEFT_ONLY (1)  // 只启用巡线左边线限制
+#define VS_CX_LIMIT_RIGHT_ONLY (2) // 只启用巡线右边线限制
 #define VS_CX_LIMIT_MODE (0)       // 初始模式：0=两侧，1=仅左侧，2=仅右侧
 #if VS_CX_LIMIT_MODE < VS_CX_LIMIT_BOTH || VS_CX_LIMIT_MODE > VS_CX_LIMIT_RIGHT_ONLY
 #error "VS_CX_LIMIT_MODE must be 0, 1 or 2"
 #endif
-#define VS_CX_MIN (60)      // 底部中心X下限
-#define VS_CX_MAX (260)     // 底部中心X上限
+// X 限制不再使用固定值，而是逐行读取巡线模块输出的左右边线。
 #define VS_BY_MIN (50)      // 底部中心Y下限；也是权重LUT归一化起点
 #define VS_BY_MAX (80)     // LUT归一化终点；超过后继续使用最大权重
 #define VS_FINALIZE_Y (90) // 提前结算线
@@ -88,11 +86,8 @@ struct VSConfig
     int area_min = VS_AREA_MIN;
     int area_max = VS_AREA_MAX;
 
-    int cx_min = VS_CX_MIN;
-    int cx_max = VS_CX_MAX;
     int warning_area_min = VS_WARNING_AREA_MIN;
     int warning_area_max = VS_WARNING_AREA_MAX;
-    int warning_clear_frames = VS_WARNING_CLEAR_FRAMES;
     int by_min = VS_BY_MIN;
     int by_max = VS_BY_MAX;
     int finalize_y = VS_FINALIZE_Y;
@@ -141,7 +136,7 @@ public:
     // 设置外部摄像头（共享已有 uvc_dev，避免重复 open /dev/video0）
     void set_external_camera(void *ext_uvc);
 
-    // 运行时X限幅模式：0=左右限幅，1=只限左侧，2=只限右侧。
+    // 运行时动态边线限幅模式：0=左右开启，1=仅左开启，2=仅右开启。
     // 可在其他cpp中通过 g_vs.set_cx_limit_mode(mode) 随时切换。
     bool set_cx_limit_mode(int mode);
     int get_cx_limit_mode() const;
@@ -258,8 +253,11 @@ private:
     int fps_count = 0;
     std::atomic<bool> red_warning{false};
     std::atomic<int> cx_limit_mode{VS_CX_LIMIT_MODE};
+    int track_left_limit[UVC_HEIGHT] = {};  // 巡线左边线映射到 VS 有效检测区的逐行限制
+    int track_right_limit[UVC_HEIGHT] = {}; // 巡线右边线映射到 VS 有效检测区的逐行限制
+    bool track_left_valid[UVC_HEIGHT] = {};  // 对应行是否有可用于限幅的左边线
+    bool track_right_valid[UVC_HEIGHT] = {}; // 对应行是否有可用于限幅的右边线
     bool warning_armed = true;
-    int warning_clear_count = 0; // 空一帧不立即重触发，避免阈值边缘抖动产生连续预警
     std::chrono::steady_clock::time_point last_result_time = std::chrono::steady_clock::time_point::min();
 
     // ===== 内部方法 =====
@@ -268,7 +266,8 @@ private:
     void draw_guidelines(cv::Mat &src);
     void bgr_to_rgb565(cv::Mat &src);
     bool build_red_tuning_debug_image();
-    bool cx_is_valid(int cx, int mode) const;
+    void update_track_edge_limits();
+    bool cx_is_valid(int cx, int bottom_y, int mode) const;
 
     static std::string classify_label(const std::string &label);
 };

@@ -12,7 +12,7 @@
 // AI ROI 图传模式：0=手动模式（每按一次 U 发送下一张有效 ROI）；
 //                   1=自动模式（按 U 启停，开启后连续发送 ROI）。
 #ifndef VS_AI_STREAM_MODE
-#define VS_AI_STREAM_MODE (0)
+#define VS_AI_STREAM_MODE (1)
 #endif
 
 #if VS_AI_STREAM_MODE != 0 && VS_AI_STREAM_MODE != 1
@@ -21,7 +21,7 @@
 
 #define VS_AI_STREAM_SERVER_IP "192.168.31.10" // 默认上位机 IP
 #define VS_AI_STREAM_IMAGE_PORT (8091)          // VSAI 图片端口
-#define VS_AI_STREAM_DEFAULT_ENABLED (0)        // 1=程序启动时开启服务
+#define VS_AI_STREAM_DEFAULT_ENABLED (VS_AI_STREAM_MODE) // 自动模式随程序启动，手动模式等待 U 键
 
 /// 上位机连接配置。
 struct VSAiStreamConfig
@@ -58,3 +58,12 @@ std::uint32_t vs_ai_stream_publish_image(const std::uint8_t *bgr64,
                                          std::size_t row_stride,
                                          std::uint16_t center_x,
                                          std::uint16_t bottom_y);
+
+/// 发布红色预警触发帧中的 320x240 BGR 全景图。
+/// 仅自动模式会发送；手动模式直接返回 0，且不会消费 U 键登记的截图请求。
+/// 线上使用 VSAI version=2、type=2 的全景图消息，像素载荷为 RGB888。
+/// @return 自动模式下成功入队时的图片序号，其他情况返回 0。
+std::uint32_t vs_ai_stream_publish_warning_image(const std::uint8_t *bgr320x240,
+                                                 std::size_t row_stride,
+                                                 std::uint16_t center_x,
+                                                 std::uint16_t bottom_y);

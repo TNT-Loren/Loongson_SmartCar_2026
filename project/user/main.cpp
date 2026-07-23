@@ -225,7 +225,7 @@ int main(int, char **)
 
             need_print.store(0);
         }
-        system_delay_ms(5);
+        system_delay_ms(3);
     }
 }
 

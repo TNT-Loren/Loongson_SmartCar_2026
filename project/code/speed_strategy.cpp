@@ -14,19 +14,22 @@ TrackInfo g_track_info;
 // 146 约 3.0 m / s 876 RPM
 
   //  基础目标车速配置
-     float k_speed_straight = 130.0f;//aaa
-     float k_speed_curve = 105.0f;
-     float k_speed_sharp = 95.0f;
-     float k_speed_obstacle_avoid = 40.0f;//绕行
-     float k_speed_circle = 110.0f;
-     float k_speed_lost = 95.0f;
+    //  float k_speed_straight = 130.0f;//aaa
+    //  float k_speed_curve = 105.0f;
+    //  float k_speed_sharp = 95.0f;
+    //  float k_speed_obstacle_avoid = 40.0f;//绕行
+    //  float k_speed_circle = 110.0f;
+    //  float k_speed_lost = 95.0f;
 
-    //  float k_speed_straight = 170.0f; //716
-    //  float k_speed_curve = 150.0f;
-    //  float k_speed_sharp = 140.0f;
-    //  float k_speed_obstacle_avoid = 40.0f; // 绕行
-    //  float k_speed_circle = 140.0f;
-    //  float k_speed_lost = 160.0f;
+     float k_speed_straight = 170.0f; //716
+     float k_speed_curve = 150.0f;
+     float k_speed_sharp = 140.0f;
+     float k_speed_obstacle_avoid = 50.0f; // 绕行
+     float k_speed_circle = 140.0f;
+     float k_speed_lost = 160.0f;
+
+
+
     //  float k_speed_straight = 170.0f*1.3f; //
     //  float k_speed_curve = 140.0f * 1.3f;
     //  float k_speed_sharp = 135.0f * 1.3f;

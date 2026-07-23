@@ -1,5 +1,6 @@
 #include "vs_inference.hpp"
 #include "vs_ai_stream.hpp"
+#include "image_test.hpp"
 #include <chrono>
 #include <cstring>
 #include <cmath>
@@ -95,19 +96,12 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     initialized = false;
     red_warning.store(false, std::memory_order_relaxed);
     warning_armed = true;
-    warning_clear_count = 0;
 
     if (cfg.color_detect_y_max < 0 || cfg.color_detect_y_max >= UVC_HEIGHT ||
         cfg.finalize_y > cfg.color_detect_y_max)
     {
         printf("VS color detect Y must satisfy finalize_y <= max < %d, current finalize=%d max=%d\r\n",
                UVC_HEIGHT, cfg.finalize_y, cfg.color_detect_y_max);
-        return false;
-    }
-    if (cfg.cx_min < 0 || cfg.cx_max < cfg.cx_min || cfg.cx_max >= UVC_WIDTH)
-    {
-        printf("VS X range must satisfy 0 <= min <= max < %d, current=[%d, %d]\r\n",
-               UVC_WIDTH, cfg.cx_min, cfg.cx_max);
         return false;
     }
     if (cfg.by_min < 0 || cfg.by_max <= cfg.by_min)
@@ -120,12 +114,6 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     {
         printf("VS warning area must satisfy 0 <= min <= max, current=[%d, %d]\r\n",
                cfg.warning_area_min, cfg.warning_area_max);
-        return false;
-    }
-    if (cfg.warning_clear_frames <= 0)
-    {
-        printf("VS warning clear frames must be positive, current=%d\r\n",
-               cfg.warning_clear_frames);
         return false;
     }
 #if VS_ENABLE_RED_MASK_CLOSE
@@ -274,11 +262,8 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
     cfg.area_min = VS_AREA_MIN;
     cfg.area_max = VS_AREA_MAX;
     cfg.hsv_scale = VS_HSV_SCALE;
-    cfg.cx_min = VS_CX_MIN;
-    cfg.cx_max = VS_CX_MAX;
     cfg.warning_area_min = VS_WARNING_AREA_MIN;
     cfg.warning_area_max = VS_WARNING_AREA_MAX;
-    cfg.warning_clear_frames = VS_WARNING_CLEAR_FRAMES;
     cfg.by_min = VS_BY_MIN;
     cfg.by_max = VS_BY_MAX;
     cfg.finalize_y = VS_FINALIZE_Y;
@@ -320,13 +305,94 @@ int VSInference::get_cx_limit_mode() const
     return cx_limit_mode.load(std::memory_order_relaxed);
 }
 
-bool VSInference::cx_is_valid(int cx, int mode) const
+namespace
 {
+// 用相邻有效边线插值填补内部丢线；顶部/底部缺口沿用最近有效值。
+// 若整侧都没有有效数据则保持 invalid，由目标筛选执行失败关闭。
+void fill_track_edge_gaps(int *limits, bool *valid, int count)
+{
+    int first = 0;
+    while (first < count && !valid[first])
+    {
+        ++first;
+    }
+    if (first == count)
+    {
+        return;
+    }
+
+    for (int y = 0; y < first; ++y)
+    {
+        limits[y] = limits[first];
+        valid[y] = true;
+    }
+
+    int previous = first;
+    for (int next = first + 1; next < count; ++next)
+    {
+        if (!valid[next])
+        {
+            continue;
+        }
+
+        const int span = next - previous;
+        const int delta = limits[next] - limits[previous];
+        for (int y = previous + 1; y < next; ++y)
+        {
+            limits[y] = limits[previous] + delta * (y - previous) / span;
+            valid[y] = true;
+        }
+        previous = next;
+    }
+
+    for (int y = previous + 1; y < count; ++y)
+    {
+        limits[y] = limits[previous];
+        valid[y] = true;
+    }
+}
+} // namespace
+
+// 将巡线模块发布的左右边线只读映射到 VS 有效检测区 Y=0..color_detect_y_max。
+// 下半幅不参与映射；快照与正常巡线绘图共用数据源，但不回写边线数组。
+void VSInference::update_track_edge_limits()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_image_mutex);
+        for (int y = 0; y < detect_h; ++y)
+        {
+            const int track_y = std::clamp(y * image_height / UVC_HEIGHT,
+                                           0, static_cast<int>(image_height) - 1);
+            const int track_left = left_edge_line[track_y];
+            const int track_right = right_edge_line[track_y];
+
+            track_left_limit[y] = std::clamp(
+                track_left * UVC_WIDTH / image_width, 0, UVC_WIDTH - 1);
+            track_right_limit[y] = std::clamp(
+                track_right * UVC_WIDTH / image_width, 0, UVC_WIDTH - 1);
+
+            // 巡线以贴图像边缘的值表示丢线，不能把它当作 VS 的全幅有效区域。
+            track_left_valid[y] =
+                track_left > Border_Min && track_left < Border_Max;
+            track_right_valid[y] =
+                track_right > Border_Min && track_right < Border_Max;
+        }
+    }
+
+    fill_track_edge_gaps(track_left_limit, track_left_valid, detect_h);
+    fill_track_edge_gaps(track_right_limit, track_right_valid, detect_h);
+}
+
+bool VSInference::cx_is_valid(int cx, int bottom_y, int mode) const
+{
+    const int y = std::clamp(bottom_y, 0, detect_h - 1);
     if (mode == VS_CX_LIMIT_LEFT_ONLY)
-        return cx >= cfg.cx_min;
+        return track_left_valid[y] && cx >= track_left_limit[y];
     if (mode == VS_CX_LIMIT_RIGHT_ONLY)
-        return cx <= cfg.cx_max;
-    return cx >= cfg.cx_min && cx <= cfg.cx_max;
+        return track_right_valid[y] && cx <= track_right_limit[y];
+    return track_left_valid[y] && track_right_valid[y] &&
+           track_right_limit[y] > track_left_limit[y] &&
+           cx >= track_left_limit[y] && cx <= track_right_limit[y];
 }
 
 // ===================================================================
@@ -417,6 +483,8 @@ bool VSInference::tick_bgr(const cv::Mat &bgr)
 // ===================================================================
 void VSInference::process_frame(cv::Mat &src)
 {
+    update_track_edge_limits();
+
     // ---- 先裁剪 Y=0..color_detect_y_max，再降采样；下半幅不进入色域计算 ----
     cv::Mat detect_source = src(cv::Rect(0, 0, UVC_WIDTH, detect_h));
     if (cfg.hsv_scale > 1)
@@ -490,6 +558,10 @@ void VSInference::process_frame(cv::Mat &src)
 
     int half = cfg.box_size / 2;
     bool warning_detected = false;
+#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
+    int warning_cx = -1;
+    int warning_by = -1;
+#endif
     const int current_cx_limit_mode =
         cx_limit_mode.load(std::memory_order_relaxed);
 
@@ -508,7 +580,7 @@ void VSInference::process_frame(cv::Mat &src)
         const int by = (sy + sh) * detect_h / hsv_h - 1;
 
         // 预警区和正式检测区共用X限幅；范围外轮廓不再计算面积和后续条件。
-        if (!cx_is_valid(cx, current_cx_limit_mode))
+        if (!cx_is_valid(cx, by, current_cx_limit_mode))
             continue;
 
         const int area = red_component_areas[i];
@@ -518,6 +590,14 @@ void VSInference::process_frame(cv::Mat &src)
             area >= cfg.warning_area_min && area <= cfg.warning_area_max)
         {
             warning_detected = true;
+#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
+            // 多个候选同时出现时，截图选择离正式检测区最近的一个。
+            if (by > warning_by)
+            {
+                warning_cx = cx;
+                warning_by = by;
+            }
+#endif
         }
 
         // 过滤噪点（面积阈值在原始分辨率空间，不受 hsv_scale 影响）
@@ -554,35 +634,29 @@ void VSInference::process_frame(cv::Mat &src)
         }
     }
 
-    if (warning_detected)
+    // 正式结算会重新布防下一目标，但当前目标尚未清场时仍处于 WAIT_CLEAR；
+    // 此阶段禁止同一目标的分裂/抖动轮廓再次发布预警和全景图。
+    if (warning_detected && state != WAIT_CLEAR)
     {
-        warning_clear_count = 0;
         if (warning_armed)
         {
-            // 同一个连续可见的色块只发布一次预警事件。
+            // 预警后保持锁定；目标正式完成检测前，即使掩膜消失后重现也不再触发。
             warning_armed = false;
             red_warning.store(true, std::memory_order_release);
+#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
+            // 红色预警发布触发时的 320x240 原始全景帧；不裁剪、不缩放。
+            if (vs_ai_stream_is_enabled() && warning_cx >= 0 && warning_by >= 0)
+            {
+                vs_ai_stream_publish_warning_image(
+                    src.ptr<std::uint8_t>(0), src.step,
+                    static_cast<std::uint16_t>(warning_cx),
+                    static_cast<std::uint16_t>(warning_by));
+            }
+#endif
 #if VS_ENABLE_TERMINAL_OUTPUT
             printf("[WARNING] red target detected before y=%d\r\n", cfg.by_min);
 #endif
         }
-    }
-    else if (!has_best && state == IDLE)
-    {
-        // 误预警可能进不了模型有效区；必须连续多帧完全清空后才重新布防。
-        if (warning_clear_count < cfg.warning_clear_frames)
-        {
-            ++warning_clear_count;
-        }
-        if (warning_clear_count >= cfg.warning_clear_frames)
-        {
-            warning_armed = true;
-        }
-    }
-    else
-    {
-        // 目标已进入正式检测/跟踪区，本轮由最终分类负责结束。
-        warning_clear_count = 0;
     }
 
 #if VS_ENABLE_TERMINAL_OUTPUT
@@ -878,7 +952,7 @@ bool VSInference::build_red_tuning_debug_image()
         const int cx = (left + right) / 2;
         const int by = (sy + sh) * detect_h / hsv_h - 1;
 
-        if (!cx_is_valid(cx, current_cx_limit_mode))
+        if (!cx_is_valid(cx, by, current_cx_limit_mode))
             continue;
 
         const int area = red_component_areas[i];
@@ -978,8 +1052,8 @@ void VSInference::output_final(bool immediate)
             best_w = 0;
             best_label = "";
             red_warning.store(false, std::memory_order_release);
+            // 目标已完成正式检测流程（结果因冷却丢弃），允许下一目标预警。
             warning_armed = true;
-            warning_clear_count = 0;
             return;
         }
     }
@@ -997,7 +1071,6 @@ void VSInference::output_final(bool immediate)
     // 当前目标已产生投票结果，清除旧事件并允许下一个目标再次触发一次预警。
     red_warning.store(false, std::memory_order_release);
     warning_armed = true;
-    warning_clear_count = 0;
 
 #if VS_ENABLE_TERMINAL_OUTPUT
     printf("\n========================================\n");
@@ -1026,10 +1099,31 @@ void VSInference::draw_guidelines(cv::Mat &src)
     h_line(src, cfg.by_max, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 上界
     h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 提前结算线
     const int mode = cx_limit_mode.load(std::memory_order_relaxed);
+    const int edge_rows = std::min(src.rows, detect_h);
     if (mode != VS_CX_LIMIT_RIGHT_ONLY)
-        bres_line(src, cfg.cx_min, 0, cfg.cx_min, src.rows - 1, cv::Scalar(0, 255, 255));
+    {
+        for (int y = 1; y < edge_rows; ++y)
+        {
+            if (!track_left_valid[y - 1] || !track_left_valid[y])
+                continue;
+            bres_line(src,
+                      track_left_limit[y - 1], y - 1,
+                      track_left_limit[y], y,
+                      cv::Scalar(0, 255, 255));
+        }
+    }
     if (mode != VS_CX_LIMIT_LEFT_ONLY)
-        bres_line(src, cfg.cx_max, 0, cfg.cx_max, src.rows - 1, cv::Scalar(0, 255, 255));
+    {
+        for (int y = 1; y < edge_rows; ++y)
+        {
+            if (!track_right_valid[y - 1] || !track_right_valid[y])
+                continue;
+            bres_line(src,
+                      track_right_limit[y - 1], y - 1,
+                      track_right_limit[y], y,
+                      cv::Scalar(0, 255, 255));
+        }
+    }
 }
 
 // ===================================================================

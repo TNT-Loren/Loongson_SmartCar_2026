@@ -2,7 +2,6 @@
 
 #if VS_AI_STREAM_FEATURE_ENABLE
 
-#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -22,17 +21,20 @@
 
 namespace
 {
-constexpr std::uint8_t k_protocol_version = 1; // VSAI 协议版本
-constexpr std::uint8_t k_message_image = 1;    // 图片消息类型
+constexpr std::uint8_t k_roi_protocol_version = 1;     // 原 64x64 ROI 协议版本
+constexpr std::uint8_t k_warning_protocol_version = 2; // 红色预警全景图协议版本
+constexpr std::uint8_t k_message_roi_image = 1;        // 原 ROI 图片消息类型
+constexpr std::uint8_t k_message_warning_panorama = 2; // 红色预警全景图消息类型
 constexpr std::uint8_t k_pixel_rgb888 = 2;     // RGB888 像素格式编号
 constexpr std::size_t k_header_size = 36;      // VSAI 固定包头字节数
-constexpr std::size_t k_image_width = 64;      // 模型输入宽度
-constexpr std::size_t k_image_height = 64;     // 模型输入高度
+constexpr std::size_t k_roi_width = 64;        // 模型输入宽度
+constexpr std::size_t k_roi_height = 64;       // 模型输入高度
+constexpr std::size_t k_panorama_width = 320;  // 红色预警全景宽度
+constexpr std::size_t k_panorama_height = 240; // 红色预警全景高度
 constexpr std::size_t k_image_channels = 3;    // RGB 通道数
-constexpr std::size_t k_image_bytes = k_image_width * k_image_height * k_image_channels;
 constexpr auto k_reconnect_delay = std::chrono::milliseconds(1000); // 重连间隔
 constexpr int k_connect_timeout_ms = 500; // 单次 TCP 连接超时
-constexpr int k_send_timeout_ms = 250;    // 单次 TCP 发送超时
+constexpr int k_send_timeout_ms = 1500;   // 兼容 320x240 全景载荷的单次 TCP 发送超时
 
 // 图传服务总开关。视觉线程和网络线程通过原子变量同步，避免加锁读取。
 std::atomic<bool> g_stream_enabled{false};
@@ -44,11 +46,16 @@ std::atomic<bool> g_manual_image_requested{false};
 // 一条等待封包发送的模型输入图片及其定位信息。
 struct ImageMessage
 {
+    std::uint8_t protocol_version = k_roi_protocol_version;
+    std::uint8_t message_type = k_message_roi_image;
     std::uint32_t sequence = 0;  // 图片序号
     std::uint64_t timestamp_ms = 0; // 单调时钟时间戳，单位毫秒
+    std::uint16_t width = 0;
+    std::uint16_t height = 0;
     std::uint16_t center_x = 0;  // 目标中心在原始图像中的 X 坐标
     std::uint16_t bottom_y = 0;  // 目标底部在原始图像中的 Y 坐标
-    std::array<std::uint8_t, k_image_bytes> pixels{}; // 64x64 RGB888 载荷
+    bool warning = false;        // 仅供本地队列调度，不写入线上协议
+    std::vector<std::uint8_t> pixels; // RGB888 载荷，尺寸由包头 width/height 描述
 };
 
 // 返回当前单调时钟的毫秒值，用于图片时间戳。
@@ -83,20 +90,26 @@ void append_u64(std::vector<std::uint8_t> &out, std::uint64_t value)
     append_u32(out, static_cast<std::uint32_t>(value & 0xffffffffULL));
 }
 
-// 将图片元数据和 RGB888 像素组装成一条完整 VSAI 消息。
+// VSAI 36 字节网络大端序包头：
+//  0..3  magic="VSAI"       4 version         5 message_type
+//  6..7  header_size         8..11 sequence    12..19 timestamp_ms
+// 20..23 payload_size       24..25 width       26..27 height
+// 28     channels           29 pixel_format    30..31 center_x
+// 32..33 bottom_y           34..35 reserved，随后紧跟 RGB888 像素。
+// version=1/type=1 是原 64x64 ROI；version=2/type=2 是 320x240 红色预警全景图。
 std::vector<std::uint8_t> make_image_packet(const ImageMessage &message)
 {
     std::vector<std::uint8_t> packet;
     packet.reserve(k_header_size + message.pixels.size());
     packet.insert(packet.end(), {'V', 'S', 'A', 'I'});
-    packet.push_back(k_protocol_version);
-    packet.push_back(k_message_image);
+    packet.push_back(message.protocol_version);
+    packet.push_back(message.message_type);
     append_u16(packet, static_cast<std::uint16_t>(k_header_size));
     append_u32(packet, message.sequence);
     append_u64(packet, message.timestamp_ms);
     append_u32(packet, static_cast<std::uint32_t>(message.pixels.size()));
-    append_u16(packet, k_image_width);
-    append_u16(packet, k_image_height);
+    append_u16(packet, message.width);
+    append_u16(packet, message.height);
     packet.push_back(k_image_channels);
     packet.push_back(k_pixel_rgb888);
     append_u16(packet, message.center_x);
@@ -223,6 +236,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(image_mutex_);
             image_pending_ = false;
+            warning_pending_ = false;
         }
         state_cv_.notify_all();
         image_cv_.notify_all();
@@ -234,14 +248,29 @@ public:
         return enabled_.load(std::memory_order_acquire);
     }
 
-    // 复制一张 BGR ROI，按模型预处理转为 RGB888 后交给网络线程。
+    // 复制一张 BGR 图片，转为 RGB888 后交给网络线程。
+    // 预警图使用独立槽位，避免被随后连续发布的普通 ROI 覆盖。
     std::uint32_t publish_image(const std::uint8_t *image,
                                 std::size_t row_stride,
+                                std::uint16_t width,
+                                std::uint16_t height,
                                 std::uint16_t center_x,
-                                std::uint16_t bottom_y)
+                                std::uint16_t bottom_y,
+                                bool warning)
     {
+#if VS_AI_STREAM_MODE == 0
+        // 手动构建从发送层禁止全景消息，即使未来出现错误的内部调用也不会入队。
+        if (warning)
+            return 0;
+#endif
         if (!enabled() || image == nullptr ||
-            row_stride < k_image_width * k_image_channels)
+            width == 0 || height == 0 ||
+            row_stride < static_cast<std::size_t>(width) * k_image_channels)
+        {
+            return 0;
+        }
+        if ((!warning && (width != k_roi_width || height != k_roi_height)) ||
+            (warning && (width != k_panorama_width || height != k_panorama_height)))
         {
             return 0;
         }
@@ -250,14 +279,25 @@ public:
         message.sequence = next_sequence_.fetch_add(1, std::memory_order_relaxed);
         const std::uint32_t sequence = message.sequence;
         message.timestamp_ms = monotonic_ms();
+        message.protocol_version = warning
+                                       ? k_warning_protocol_version
+                                       : k_roi_protocol_version;
+        message.message_type = warning
+                                   ? k_message_warning_panorama
+                                   : k_message_roi_image;
+        message.width = width;
+        message.height = height;
         message.center_x = center_x;
         message.bottom_y = bottom_y;
-        for (std::size_t row = 0; row < k_image_height; ++row)
+        message.warning = warning;
+        message.pixels.resize(static_cast<std::size_t>(width) * height *
+                              k_image_channels);
+        for (std::size_t row = 0; row < height; ++row)
         {
             const std::uint8_t *source = image + row * row_stride;
             std::uint8_t *destination =
-                message.pixels.data() + row * k_image_width * k_image_channels;
-            for (std::size_t column = 0; column < k_image_width; ++column)
+                message.pixels.data() + row * width * k_image_channels;
+            for (std::size_t column = 0; column < width; ++column)
             {
                 // OpenCV ROI 是 BGR；模型在 Infer() 中使用的输入顺序是 RGB。
                 destination[column * 3] = source[column * 3 + 2];
@@ -268,8 +308,16 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(image_mutex_);
-            latest_image_ = std::move(message);
-            image_pending_ = true;
+            if (warning)
+            {
+                warning_image_ = std::move(message);
+                warning_pending_ = true;
+            }
+            else
+            {
+                latest_image_ = std::move(message);
+                image_pending_ = true;
+            }
         }
         image_cv_.notify_one();
         return sequence;
@@ -304,7 +352,7 @@ private:
                 std::unique_lock<std::mutex> lock(image_mutex_);
                 image_cv_.wait(lock, [this] {
                     return stopping_.load(std::memory_order_acquire) ||
-                           !enabled() || image_pending_;
+                           !enabled() || warning_pending_ || image_pending_;
                 });
                 if (stopping_.load(std::memory_order_acquire))
                     break;
@@ -320,10 +368,26 @@ private:
                     });
                     continue;
                 }
-                if (!image_pending_)
+                // 两个槽位都非空时按发布序号取较早者，保持线上序号顺序不变。
+                const bool take_warning =
+                    warning_pending_ &&
+                    (!image_pending_ ||
+                     static_cast<std::int32_t>(warning_image_.sequence -
+                                               latest_image_.sequence) < 0);
+                if (take_warning)
+                {
+                    message = warning_image_;
+                    warning_pending_ = false;
+                }
+                else if (image_pending_)
+                {
+                    message = latest_image_;
+                    image_pending_ = false;
+                }
+                else
+                {
                     continue;
-                message = latest_image_;
-                image_pending_ = false;
+                }
             }
 
             if (!enabled())
@@ -338,6 +402,16 @@ private:
                 if (socket_fd >= 0)
                     close(socket_fd);
                 socket_fd = -1;
+                // 普通 ROI 仍保持“只留最新”的实时策略；单次预警图则保留到重连成功。
+                if (message.warning)
+                {
+                    std::lock_guard<std::mutex> lock(image_mutex_);
+                    if (enabled() && !warning_pending_)
+                    {
+                        warning_image_ = std::move(message);
+                        warning_pending_ = true;
+                    }
+                }
                 wait_reconnect();
             }
         }
@@ -359,6 +433,8 @@ private:
     std::condition_variable image_cv_; // 新图片或服务状态变化通知
     ImageMessage latest_image_;        // 队列中保留的最新图片
     bool image_pending_ = false;       // 是否存在待发送图片
+    ImageMessage warning_image_;       // 单独保留的红色预警触发图片
+    bool warning_pending_ = false;     // 是否存在待发送预警图
 
     std::thread image_thread_; // 后台 TCP 发送线程
 };
@@ -430,12 +506,35 @@ std::uint32_t vs_ai_stream_publish_image(const std::uint8_t *bgr64,
     if (!g_stream_enabled.load(std::memory_order_acquire))
         return 0;
 #if VS_AI_STREAM_MODE == 0
-    if (bgr64 == nullptr || row_stride < k_image_width * k_image_channels)
+    if (bgr64 == nullptr || row_stride < k_roi_width * k_image_channels)
         return 0;
     if (!g_manual_image_requested.exchange(false, std::memory_order_acq_rel))
         return 0;
 #endif
-    return service().publish_image(bgr64, row_stride, center_x, bottom_y);
+    return service().publish_image(
+        bgr64, row_stride, k_roi_width, k_roi_height,
+        center_x, bottom_y, false);
+}
+
+// 预警图只在自动模式发布，使用 version=2/type=2 的 320x240 RGB888 全景协议。
+std::uint32_t vs_ai_stream_publish_warning_image(const std::uint8_t *bgr320x240,
+                                                 std::size_t row_stride,
+                                                 std::uint16_t center_x,
+                                                 std::uint16_t bottom_y)
+{
+#if VS_AI_STREAM_MODE == 1
+    if (!g_stream_enabled.load(std::memory_order_acquire))
+        return 0;
+    return service().publish_image(
+        bgr320x240, row_stride, k_panorama_width, k_panorama_height,
+        center_x, bottom_y, true);
+#else
+    (void)bgr320x240;
+    (void)row_stride;
+    (void)center_x;
+    (void)bottom_y;
+    return 0;
+#endif
 }
 
 #endif // VS_AI_STREAM_FEATURE_ENABLE
