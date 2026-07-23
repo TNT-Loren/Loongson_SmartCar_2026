@@ -8,6 +8,11 @@
 
 VSInference g_vs;
 
+static_assert(VS_TRACK_EDGE_X_MIN >= 0 &&
+                  VS_TRACK_EDGE_X_MIN < VS_TRACK_EDGE_X_MAX &&
+                  VS_TRACK_EDGE_X_MAX < UVC_WIDTH,
+              "VS track edge X limits must be within the camera frame");
+
 #if VS_AI_STREAM_FEATURE_ENABLE
 static_assert(VS_BOX_SIZE == 64,
               "VS AI stream protocol currently requires a 64x64 model ROI");
@@ -359,9 +364,11 @@ void VSInference::update_track_edge_limits()
             const int track_right = right_edge_line[track_y];
 
             track_left_limit[y] = std::clamp(
-                track_left * UVC_WIDTH / image_width, 0, UVC_WIDTH - 1);
+                track_left * UVC_WIDTH / image_width,
+                VS_TRACK_EDGE_X_MIN, VS_TRACK_EDGE_X_MAX);
             track_right_limit[y] = std::clamp(
-                track_right * UVC_WIDTH / image_width, 0, UVC_WIDTH - 1);
+                track_right * UVC_WIDTH / image_width,
+                VS_TRACK_EDGE_X_MIN, VS_TRACK_EDGE_X_MAX);
 
             // 巡线以贴图像边缘的值表示丢线，不能把它当作 VS 的全幅有效区域。
             track_left_valid[y] =

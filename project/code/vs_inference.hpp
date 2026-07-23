@@ -24,6 +24,10 @@
 #define VS_AREA_MIN (24)       // 色块最小面积，单位为320x240原图px^2
 #define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
 
+// VS 左右边线 X 限制调参区：越界后强制锁定到对应边界。
+#define VS_TRACK_EDGE_X_MIN (10)
+#define VS_TRACK_EDGE_X_MAX (310)
+
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
 #define VS_CX_LIMIT_BOTH (0)       // 同时启用巡线左右边线限制
 #define VS_CX_LIMIT_LEFT_ONLY (1)  // 只启用巡线左边线限制
@@ -33,7 +37,7 @@
 #error "VS_CX_LIMIT_MODE must be 0, 1 or 2"
 #endif
 // X 限制不再使用固定值，而是逐行读取巡线模块输出的左右边线。
-#define VS_BY_MIN (55)      // 底部中心Y下限；也是权重LUT归一化起点
+#define VS_BY_MIN (50)      // 底部中心Y下限；也是权重LUT归一化起点
 #define VS_BY_MAX (80)     // LUT归一化终点；超过后继续使用最大权重
 #define VS_FINALIZE_Y (90) // 提前结算线
 
