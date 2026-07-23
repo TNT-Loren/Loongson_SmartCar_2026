@@ -6,13 +6,13 @@
 
 // VS AI 图片上传总开关。最终识别结果仍使用原有终端输出，不走此端口。
 #ifndef VS_AI_STREAM_FEATURE_ENABLE
-#define VS_AI_STREAM_FEATURE_ENABLE (1) // 0=完全编译移除，1=保留运行时开关
+#define VS_AI_STREAM_FEATURE_ENABLE (0) // 0=完全编译移除，1=保留运行时开关
 #endif
 
 // AI ROI 图传模式：0=手动模式（每按一次 U 发送下一张有效 ROI）；
 //                   1=自动模式（按 U 启停，开启后连续发送 ROI）。
 #ifndef VS_AI_STREAM_MODE
-#define VS_AI_STREAM_MODE (1)
+#define VS_AI_STREAM_MODE (0)
 #endif
 
 #if VS_AI_STREAM_MODE != 0 && VS_AI_STREAM_MODE != 1

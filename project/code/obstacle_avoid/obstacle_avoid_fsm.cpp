@@ -11,33 +11,33 @@ namespace
 // 状态 1A 使用反向速度目标快速制动；最终 PWM 仍受速度环的 +/-55% 上限保护。
 constexpr float k_avoid_decelerate_target_speed = -120.0f;
 // 状态 1B 在等待 AI 最终分类时保持正向低速，避免 -90 目标让车辆继续倒车。
-constexpr float k_avoid_warning_hold_speed = 10.0f;
+constexpr float k_avoid_warning_hold_speed = 20.0f;
 // 左右轮的有符号速度都不超过该值时，锁存“制动完成”，不再回到 -90。
-constexpr float k_avoid_decelerate_exit_speed = 30.0f;
+constexpr float k_avoid_decelerate_exit_speed = 10.0f;
 // 红色预警发生后最多等待 1 秒最终分类，超时则取消本次绕行。
-constexpr auto k_avoid_warning_result_timeout = std::chrono::milliseconds(1500);
+constexpr auto k_avoid_warning_result_timeout = std::chrono::milliseconds(2000);
 // 方向已确认但 2 秒内仍未降到阈值，按减速超时取消本次绕行。
 constexpr auto k_avoid_decelerate_timeout = std::chrono::milliseconds(2000);
 
 // 状态 2 定角转向时的基础轮速；角度 PID 的 steer 在此基础上形成左右差速。
 constexpr float k_avoid_turn_target_speed = 30.0f;
-// 状态 2 左绕相对角：进入状态 2 时，以当时 yaw 为零点锁存 -50 度目标。
+// 状态 2 左绕相对角：进入状态 2 时，以当时 yaw 为零点锁存 -60 度目标。
 constexpr float k_avoid_turn_relative_yaw_left = -60.0f;
-// 状态 2 右绕相对角：进入状态 2 时，以当时 yaw 为零点锁存 +50 度目标。
+// 状态 2 右绕相对角：进入状态 2 时，以当时 yaw 为零点锁存 +60 度目标。
 constexpr float k_avoid_turn_relative_yaw_right = 60.0f;
-// 状态 2 正常退出容差：目标 yaw 与当前 yaw 的最短角差不超过 40 度时进入状态 3。
-constexpr float k_avoid_turn_yaw_tolerance =20.0f;
+// 状态 2 正常退出容差：目标 yaw 与当前 yaw 的最短角差不超过 20 度时进入状态 3。
+constexpr float k_avoid_turn_yaw_tolerance = 55.0f;
 // 状态 2 角度 PID 输出上限，单位与单轮目标速度相同，不是角度上限。
 constexpr float k_avoid_turn_steer_limit = 100.0f;
 // 状态 2 最长等待时间：1 秒内未达到目标角则按转向超时取消本次绕行。
-constexpr auto k_avoid_turn_timeout = std::chrono::milliseconds(1500);
+constexpr auto k_avoid_turn_timeout = std::chrono::milliseconds(1000);
 
 // 状态 3 沿边线控制持续 1 秒；从进入 FollowEdge 状态的时刻单独开始计时。
-constexpr auto k_avoid_edge_follow_duration = std::chrono::milliseconds(1500);
+constexpr auto k_avoid_edge_follow_duration = std::chrono::milliseconds(1000);
 // 绕行完成或异常退出后的冷却时间；冷却期间拒绝新的 AI/键盘绕行请求。
 constexpr auto k_avoid_reentry_cooldown = std::chrono::milliseconds(500);
 // 正式绕行总超时保护：从进入状态 2 开始计时，不让预警等待消耗后续时间。
-constexpr auto k_avoid_total_timeout = std::chrono::milliseconds(4000);
+constexpr auto k_avoid_total_timeout = std::chrono::milliseconds(3000);
 // 状态 3 从指定可靠边向法线方向生成临时中线时使用的 IPM 像素偏移；
 // car_control.cpp 启用直接边线端点预瞄时，最终 ALP 不使用这条偏移中线。
 constexpr float k_avoid_edge_midline_offset_px = -5.0f;
@@ -195,6 +195,14 @@ bool obstacle_avoid_confirm(ObstacleAvoidDirection direction)
     if (g_state == ObstacleAvoidState::Idle)
     {
         // 最终分类比预警更可靠；预警漏掉时仍保留原来的直接绕行能力。
+        start_decelerate(direction, false, now);
+        return true;
+    }
+    if (g_state == ObstacleAvoidState::Cooldown &&
+        g_last_exit_reason == ObstacleAvoidExitReason::WarningTimeout)
+    {
+        // 最终分类可能恰好在预警等待超时后的短暂冷却期到达。
+        // 这不是重复绕行请求，而是同一目标的权威分类结果。
         start_decelerate(direction, false, now);
         return true;
     }

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <mutex>
 
 extern TrackInfo g_track_info;
@@ -30,10 +31,11 @@ constexpr float k_vehicle_x = 79.0f;
 constexpr float k_vehicle_y = 138.0f;
 constexpr float k_pi = 3.14159265358979323846f;
 constexpr uint16 k_control_work_capacity = MT9V03X_H + 2;
-// 绕行试验开关：true 时直接使用对应 IPM 边线的最大 y 点，false 回退原绕行预矄方案。
-constexpr bool k_obstacle_avoid_use_edge_endpoint_preview = true;
-// 绕行目标向车体前方的车长补偿，单位为 IPM 像素；坐标 y 减小表示向前移动。
-constexpr float k_obstacle_avoid_vehicle_length_px = 15.0f;
+// 绕行试验开关：true 时直接使用对应 IPM 边线上的前方预矄点，false 回退原绕行预矄方案。
+constexpr bool k_obstacle_avoid_use_edge_forward_preview = true;
+// 绕行预矄点沿边线向前移动的 IPM 行数；坐标 y 减小表示向前。
+// 使用正值表示“向前多少行”，避免把坐标符号混在调参参数里。
+constexpr float k_obstacle_avoid_preview_forward_rows = 30.0f;
 
 struct LegacyPreviewYawParam
 {
@@ -120,9 +122,32 @@ PurePursuitParam get_pure_pursuit_param(TrackScene scene)
     return {47.2f, 35.0f};
 }
 
-bool find_obstacle_edge_endpoint_preview(ObstacleAvoidDirection direction,
-                                         float &target_x,
-                                         float &target_y)
+// 从指定绕行方向的 IPM 边线上，向前取预瞄点。
+//
+// IPM 坐标系约定（控制侧）：
+//   y 增大 → 靠近车身（车在 y≈138，图像底部）
+//   y 减小 → 远离车身向前方（图像顶部）
+//   x 增大 → 右
+//
+// 输入边线点集 Ipm_Left_Points / Ipm_Right_Points 来自 image_test.cpp，
+// 已经过 IPM 投影 → 平滑 → 等距重采样，是沿边线有序排列的点集
+//（从近车大 y 端到远端小 y 端）。
+//
+// 算法：
+//   1. 在边线点集中找到 y 最大的点（离车最近的一端）；
+//   2. 从该端沿边线向远处推 k_obstacle_avoid_preview_forward_rows 行，
+//      得到目标行 desired_y = max_y - forward_rows；
+//   3. 在边线的相邻点对之间线性插值，找到该行对应的 x；
+//   4. 跨断点（两点间距 > k_ipm_control_break_distance）的线段直接跳过，
+//      不进行插值。
+//
+// 返回值：
+//   true  → target_x / target_y 落在一段连续的边线上，且在 IPM 图像边界内；
+//   false → 边线太短、desired_y 超出图像、或不存在 covering segment，
+//           调用方应回退到扩展中线的 pure pursuit 预瞄。
+bool find_obstacle_edge_forward_preview(ObstacleAvoidDirection direction,
+                                        float &target_x,
+                                        float &target_y)
 {
     const uint16 (*edge_points)[2] = nullptr;
     uint16 edge_count = 0;
@@ -146,6 +171,9 @@ bool find_obstacle_edge_endpoint_preview(ObstacleAvoidDirection direction,
         return false;
     }
 
+    // 步骤 1：找边线中 y 最大的近车端点。
+    // 后续不直接使用这个点的 x，而是在边线上根据目标行插值计算 x，
+    // 保证预瞄点始终落在实际边线上，弯道处 x 会随边线曲率变化。
     uint16 best_index = 0;
     for (uint16 i = 1; i < edge_count; ++i)
     {
@@ -155,19 +183,93 @@ bool find_obstacle_edge_endpoint_preview(ObstacleAvoidDirection direction,
         }
     }
 
-    const float candidate_x = static_cast<float>(edge_points[best_index][0]);
-    const float candidate_y = static_cast<float>(edge_points[best_index][1]) +
-                              k_obstacle_avoid_vehicle_length_px;
-    if (candidate_x < 0.0f || candidate_x >= static_cast<float>(MT9V03X_W) ||
-        candidate_y < 0.0f || candidate_y >= static_cast<float>(MT9V03X_H) ||
-        candidate_y >= k_vehicle_y)
+    // 步骤 2：计算沿边线向前推进后的目标行。
+    // nearest_y 是近车端（最大 y），y 减小 = 向前，所以用减法。
+    const float nearest_x = static_cast<float>(edge_points[best_index][0]);
+    const float nearest_y = static_cast<float>(edge_points[best_index][1]);
+    const float desired_y = nearest_y - k_obstacle_avoid_preview_forward_rows;
+
+    // 目标行必须在前方有效区域内：不能出图像上边界，也不能比车身参考点还靠后。
+    if (desired_y < 0.0f || desired_y >= static_cast<float>(MT9V03X_H))
+    {
+        return false;
+    }
+    if (desired_y >= k_vehicle_y)
     {
         return false;
     }
 
-    target_x = candidate_x;
-    target_y = candidate_y;
-    return true;
+    // 步骤 3：遍历边线相邻点对，寻找包含 desired_y 的线段并线性插值 x。
+    //
+    // 边线点集是沿边线有序的，因此相邻两点在空间上也是相邻的；
+    // 但若两点间距超过 k_ipm_control_break_distance（说明边线在此处有断点），
+    // 则跳过该线段 —— 禁止跨断点插值，避免在非连续区域产生虚假预瞄点。
+    //
+    // 边线若因噪声或合并导致非单调（同一 y 出现多次），选择几何上离近车端点
+    // 最近的候选点，优先取沿边线向前首次到达目标行的分支。
+    bool interpolated = false; 
+    float interpolated_x = 0.0f;
+    float nearest_segment_distance_sq = std::numeric_limits<float>::max();
+    for (uint16 i = 0; i + 1 < edge_count; ++i)
+    {
+        const float ax = static_cast<float>(edge_points[i][0]);
+        const float ay = static_cast<float>(edge_points[i][1]);
+        const float bx = static_cast<float>(edge_points[i + 1][0]);
+        const float by = static_cast<float>(edge_points[i + 1][1]);
+
+        const float dx = bx - ax;
+        const float dy = by - ay;
+        const float segment_length_sq = dx * dx + dy * dy;
+
+        // 跳过退化线段（两点重合）和断点线段（间距过大）
+        if (segment_length_sq <= 1e-6f ||
+            segment_length_sq > k_ipm_control_break_distance * k_ipm_control_break_distance)
+        {
+            continue;
+        }
+
+        // 跳过不包含 desired_y 的线段，以及水平线段（dy≈0 无法按 y 插值）
+        const float min_y = std::min(ay, by);
+        const float max_y = std::max(ay, by);
+        if (desired_y < min_y || desired_y > max_y || std::fabs(dy) <= 1e-6f)
+        {
+            continue;
+        }
+
+        // 在两点之间按 y 线性插值得到 x
+        const float t = (desired_y - ay) / dy;
+        const float candidate_x = ax + dx * std::clamp(t, 0.0f, 1.0f);
+        const float candidate_y = ay + dy * std::clamp(t, 0.0f, 1.0f);
+
+        // 计算候选点到近车端点的几何距离，用于非单调边线时的分支选择
+        const float distance_from_nearest_sq =
+            (candidate_x - nearest_x) * (candidate_x - nearest_x) +
+            (candidate_y - nearest_y) * (candidate_y - nearest_y);
+
+        // 首次命中直接采用；后续命中仅当更靠近近车端点时才替换，
+        // 避免选到边线折返后的另一分支。
+        if (!interpolated || distance_from_nearest_sq < nearest_segment_distance_sq)
+        {
+            interpolated = true;
+            interpolated_x = candidate_x;
+            nearest_segment_distance_sq = distance_from_nearest_sq;
+        }
+    }
+
+    // 步骤 4：验证结果。找不到 covering segment 说明边线不够长或已断裂，
+    // 返回 false 让调用方回退到偏移中线预瞄方案。
+    if (!interpolated)
+    {
+        return false;
+    }
+
+    target_x = interpolated_x;
+    target_y = desired_y;
+
+    // 最终边界检查：预瞄点必须在 IPM 图像范围内且在车身前方。
+    return target_x >= 0.0f && target_x < static_cast<float>(MT9V03X_W) &&
+           target_y >= 0.0f && target_y < static_cast<float>(MT9V03X_H) &&
+           target_y < k_vehicle_y;
 }
 
 float point_distance(float x1, float y1, float x2, float y2)
@@ -597,10 +699,10 @@ bool calc_preview_target_yaw_from_points(const uint16 mid_points[MT9V03X_H][2],
     float target_y = 0.0f;
     bool spatial_target_valid = false;
     if (scene == TrackScene::ObstacleAvoid &&
-        k_obstacle_avoid_use_edge_endpoint_preview)
+        k_obstacle_avoid_use_edge_forward_preview)
     {
-        // 绕行试验方案：直接用对应 IPM 边线的最大 y 点作目标，不使用中线偏移。
-        spatial_target_valid = find_obstacle_edge_endpoint_preview(
+        // 绕行主路径：从边线最大 y 的近车端点沿边线向前取预矄点，不使用偏移中线。
+        spatial_target_valid = find_obstacle_edge_forward_preview(
             current_obstacle_avoid_direction(), target_x, target_y);
     }
 

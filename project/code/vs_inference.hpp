@@ -11,7 +11,7 @@
 // ===================================================================
 // 开关：0=关闭，1=开启
 #define VS_ENABLE_TERMINAL_OUTPUT (0) // 终端打印详细识别日志
-#define VS_ENABLE_GUIDELINES (0)      // VS 彩色调试图中绘制辅助线
+#define VS_ENABLE_GUIDELINES (1)      // VS 彩色调试图中绘制辅助线
 
 // 色块检测：先 HSV 找红色目标，再用 box 框出模型输入 ROI。
 #define VS_COLOR_DETECT_Y_MAX (120) // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算
@@ -24,10 +24,6 @@
 #define VS_AREA_MIN (24)       // 色块最小面积，单位为320x240原图px^2
 #define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
 
-// 红色色块预警区：[0, VS_BY_MIN)，与模型有效区共用同一条边界线。
-#define VS_WARNING_AREA_MIN (8) // 预警红色色块最小面积，单位为320x240原图px^2
-#define VS_WARNING_AREA_MAX (70) // 预警红色色块最大面积，单位为320x240原图px^2
-
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
 #define VS_CX_LIMIT_BOTH (0)       // 同时启用巡线左右边线限制
 #define VS_CX_LIMIT_LEFT_ONLY (1)  // 只启用巡线左边线限制
@@ -37,7 +33,7 @@
 #error "VS_CX_LIMIT_MODE must be 0, 1 or 2"
 #endif
 // X 限制不再使用固定值，而是逐行读取巡线模块输出的左右边线。
-#define VS_BY_MIN (50)      // 底部中心Y下限；也是权重LUT归一化起点
+#define VS_BY_MIN (55)      // 底部中心Y下限；也是权重LUT归一化起点
 #define VS_BY_MAX (80)     // LUT归一化终点；超过后继续使用最大权重
 #define VS_FINALIZE_Y (90) // 提前结算线
 
@@ -55,10 +51,10 @@
 
 // NCNN 模型与归一化：必须与训练/导出模型时保持一致。
 // 龙邱原模型训练结果
-// #define VS_MODEL_PARAM_PATH        "tiny_classifier_fp32.ncnn.param"
-// #define VS_MODEL_BIN_PATH          "tiny_classifier_fp32.ncnn.bin"
-// #define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
-// #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
+#define VS_MODEL_PARAM_PATH        "tiny_classifier_fp32.ncnn.param"
+#define VS_MODEL_BIN_PATH          "tiny_classifier_fp32.ncnn.bin"
+#define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
+#define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
 // 激进模型1，速度未对比，测试的时候效果比第1次的好
 // #define VS_MODEL_PARAM_PATH        "falsh_tiny_classifier_fp32.ncnn.param"
@@ -67,10 +63,10 @@
 // #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
 // 激进模型2，速度未对比，测试的时候效果比第2次的好
-#define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
-#define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
-#define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
-#define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
+// #define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
+// #define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
+// #define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
+// #define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
 
 // ===================================================================
 // VSConfig：运行时配置镜像。默认值全部来自上方宏，通常只改“VS 调参区”。
@@ -86,8 +82,6 @@ struct VSConfig
     int area_min = VS_AREA_MIN;
     int area_max = VS_AREA_MAX;
 
-    int warning_area_min = VS_WARNING_AREA_MIN;
-    int warning_area_max = VS_WARNING_AREA_MAX;
     int by_min = VS_BY_MIN;
     int by_max = VS_BY_MAX;
     int finalize_y = VS_FINALIZE_Y;
@@ -162,7 +156,7 @@ public:
     // ---- 上层获取最终推理结果（触及结算线或离开有效区后输出一次） ----
     bool has_new_result() const;                  // 是否有新的最终结果待读取
     bool consume_new_result(std::string &result); // 读取、打印并清除一次最终结果
-    bool has_red_warning() const;                 // 是否有一次预警事件待读取
+    bool has_red_warning() const;                 // 首个有效 ROI 是否产生了预警事件
     bool consume_red_warning();                   // 读取并清除一次预警事件
     std::string get_label() const;                // 原始推理标签，如 "急救包" / "救护车" / "枪械"
     std::string get_result() const;               // 分类结果，如 "物资" / "载具" / "武器"
@@ -191,7 +185,6 @@ private:
     cv::Mat roi;                    // NCNN 推理 ROI  (box_size × box_size × 3)
     cv::Mat src_small;              // HSV 降采样缓冲区（预分配复用）
     cv::Mat tx_frame;               // 图传输出工作缓冲，避免每帧 clone/zeros 反复分配
-    cv::Mat red_debug_warning_mask; // 调参视图中的有效预警掩码（按需分配）
     cv::Mat red_debug_normal_mask;  // 调参视图中的有效检测掩码（按需分配）
     cv::Mat red_debug_full_mask;    // 调参视图的原分辨率掩码（按需分配）
     int detect_h = 0;               // 参与色域计算的原图高度
@@ -257,7 +250,7 @@ private:
     int track_right_limit[UVC_HEIGHT] = {}; // 巡线右边线映射到 VS 有效检测区的逐行限制
     bool track_left_valid[UVC_HEIGHT] = {};  // 对应行是否有可用于限幅的左边线
     bool track_right_valid[UVC_HEIGHT] = {}; // 对应行是否有可用于限幅的右边线
-    bool warning_armed = true;
+    bool warning_armed = true; // 首次有效 ROI 后锁定，仅在成功输出投票结果后重新布防
     std::chrono::steady_clock::time_point last_result_time = std::chrono::steady_clock::time_point::min();
 
     // ===== 内部方法 =====

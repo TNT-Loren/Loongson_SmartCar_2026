@@ -110,12 +110,6 @@ bool VSInference::init(const std::vector<std::string> &_labels,
                cfg.by_min, cfg.by_max);
         return false;
     }
-    if (cfg.warning_area_min < 0 || cfg.warning_area_max < cfg.warning_area_min)
-    {
-        printf("VS warning area must satisfy 0 <= min <= max, current=[%d, %d]\r\n",
-               cfg.warning_area_min, cfg.warning_area_max);
-        return false;
-    }
 #if VS_ENABLE_RED_MASK_CLOSE
     if (cfg.red_close_kernel_size_px <= 0 || cfg.red_close_iterations <= 0)
     {
@@ -262,8 +256,6 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
     cfg.area_min = VS_AREA_MIN;
     cfg.area_max = VS_AREA_MAX;
     cfg.hsv_scale = VS_HSV_SCALE;
-    cfg.warning_area_min = VS_WARNING_AREA_MIN;
-    cfg.warning_area_max = VS_WARNING_AREA_MAX;
     cfg.by_min = VS_BY_MIN;
     cfg.by_max = VS_BY_MAX;
     cfg.finalize_y = VS_FINALIZE_Y;
@@ -557,11 +549,6 @@ void VSInference::process_frame(cv::Mat &src)
 #endif
 
     int half = cfg.box_size / 2;
-    bool warning_detected = false;
-#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
-    int warning_cx = -1;
-    int warning_by = -1;
-#endif
     const int current_cx_limit_mode =
         cx_limit_mode.load(std::memory_order_relaxed);
 
@@ -579,26 +566,11 @@ void VSInference::process_frame(cv::Mat &src)
         const int cx = (left + right) / 2;
         const int by = (sy + sh) * detect_h / hsv_h - 1;
 
-        // 预警区和正式检测区共用X限幅；范围外轮廓不再计算面积和后续条件。
+        // 正式检测区使用巡线边线限幅；范围外轮廓不再计算面积和后续条件。
         if (!cx_is_valid(cx, by, current_cx_limit_mode))
             continue;
 
         const int area = red_component_areas[i];
-
-        // 预警区位于图像顶部到 BY_MIN 之前，BY_MIN 起进入正式模型有效区。
-        if (by >= 0 && by < cfg.by_min &&
-            area >= cfg.warning_area_min && area <= cfg.warning_area_max)
-        {
-            warning_detected = true;
-#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
-            // 多个候选同时出现时，截图选择离正式检测区最近的一个。
-            if (by > warning_by)
-            {
-                warning_cx = cx;
-                warning_by = by;
-            }
-#endif
-        }
 
         // 过滤噪点（面积阈值在原始分辨率空间，不受 hsv_scale 影响）
         if (area < cfg.area_min)
@@ -631,31 +603,6 @@ void VSInference::process_frame(cv::Mat &src)
 #endif
             best_tl = tl;
             best_br = br;
-        }
-    }
-
-    // 正式结算会重新布防下一目标，但当前目标尚未清场时仍处于 WAIT_CLEAR；
-    // 此阶段禁止同一目标的分裂/抖动轮廓再次发布预警和全景图。
-    if (warning_detected && state != WAIT_CLEAR)
-    {
-        if (warning_armed)
-        {
-            // 预警后保持锁定；目标正式完成检测前，即使掩膜消失后重现也不再触发。
-            warning_armed = false;
-            red_warning.store(true, std::memory_order_release);
-#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
-            // 红色预警发布触发时的 320x240 原始全景帧；不裁剪、不缩放。
-            if (vs_ai_stream_is_enabled() && warning_cx >= 0 && warning_by >= 0)
-            {
-                vs_ai_stream_publish_warning_image(
-                    src.ptr<std::uint8_t>(0), src.step,
-                    static_cast<std::uint16_t>(warning_cx),
-                    static_cast<std::uint16_t>(warning_by));
-            }
-#endif
-#if VS_ENABLE_TERMINAL_OUTPUT
-            printf("[WARNING] red target detected before y=%d\r\n", cfg.by_min);
-#endif
         }
     }
 
@@ -717,6 +664,27 @@ void VSInference::process_frame(cv::Mat &src)
                        0, 0, cv::INTER_LINEAR);
         }
         roi_valid = !roi.empty();
+
+        // 每轮目标在第一次得到有效 ROI 时立即预警，不再等待顶部预警区命中。
+        if (roi_valid && warning_armed)
+        {
+            warning_armed = false;
+            red_warning.store(true, std::memory_order_release);
+#if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
+            // 发布触发本次预警的 320x240 原始全景帧；不裁剪、不缩放。
+            if (vs_ai_stream_is_enabled())
+            {
+                vs_ai_stream_publish_warning_image(
+                    src.ptr<std::uint8_t>(0), src.step,
+                    static_cast<std::uint16_t>(best_cx),
+                    static_cast<std::uint16_t>(obj_by));
+            }
+#endif
+#if VS_ENABLE_TERMINAL_OUTPUT
+            printf("[WARNING] first valid ROI center=(%d,%d)\r\n",
+                   best_cx, obj_by);
+#endif
+        }
 
         try
         {
@@ -811,6 +779,7 @@ void VSInference::process_frame(cv::Mat &src)
                     votes.clear();
                     best_w = 0;
                     best_label = "";
+                    // 未形成有效投票结果，不重新布防；本轮预警仍只允许触发一次。
                     state = IDLE;
                 }
                 else
@@ -915,7 +884,7 @@ bool VSInference::build_color_debug_image()
 
 // ===================================================================
 // build_red_tuning_debug_image — 红色阈值调参视图
-//   暗红：仅通过 HSV；亮红：预警区有效；绿色：正式检测区有效。
+//   暗红：仅通过 HSV；绿色：能够形成有效 ROI 的正式检测区域。
 //   仅在调参视图被选择且上层请求图传画面时运行，不进入普通推理路径。
 // ===================================================================
 bool VSInference::build_red_tuning_debug_image()
@@ -925,8 +894,6 @@ bool VSInference::build_red_tuning_debug_image()
         return false;
     }
 
-    red_debug_warning_mask.create(mask.rows, mask.cols, CV_8UC1);
-    red_debug_warning_mask.setTo(cv::Scalar(0));
     red_debug_normal_mask.create(mask.rows, mask.cols, CV_8UC1);
     red_debug_normal_mask.setTo(cv::Scalar(0));
     red_debug_full_mask.create(UVC_HEIGHT, UVC_WIDTH, CV_8UC1);
@@ -957,19 +924,13 @@ bool VSInference::build_red_tuning_debug_image()
 
         const int area = red_component_areas[i];
 
-        const bool warning_valid =
-            by >= 0 && by < cfg.by_min &&
-            area >= cfg.warning_area_min && area <= cfg.warning_area_max;
-
         const int normal_area_max = cfg.area_max;
         const bool normal_valid =
             by >= cfg.by_min && by <= normal_y_max &&
             area >= cfg.area_min && area <= normal_area_max;
 
-        if (warning_valid)
-            component_types[i] |= 1;
         if (normal_valid)
-            component_types[i] |= 2;
+            component_types[i] = 1;
     }
 
     // 根据主检测已生成的标签着色，不再重复提取或绘制轮廓。
@@ -978,14 +939,11 @@ bool VSInference::build_red_tuning_debug_image()
         for (int y = 0; y < red_component_labels.rows; ++y)
         {
             const int *labels_row = red_component_labels.ptr<int>(y);
-            uint8_t *warning_row = red_debug_warning_mask.ptr<uint8_t>(y + red_component_roi.y);
             uint8_t *normal_row = red_debug_normal_mask.ptr<uint8_t>(y + red_component_roi.y);
             for (int x = 0; x < red_component_labels.cols; ++x)
             {
                 const uint8_t type = component_types[labels_row[x]];
-                if (type & 1)
-                    warning_row[x + red_component_roi.x] = 255;
-                if (type & 2)
+                if (type != 0)
                     normal_row[x + red_component_roi.x] = 255;
             }
         }
@@ -999,12 +957,6 @@ bool VSInference::build_red_tuning_debug_image()
     cv::resize(mask, full_detect_roi, cv::Size(UVC_WIDTH, detect_h),
                0, 0, cv::INTER_NEAREST);
     tx_frame.setTo(cv::Scalar(0, 0, 96), red_debug_full_mask);
-
-    // 通过预警区面积和位置筛选的区域覆盖为亮红。
-    red_debug_full_mask.setTo(cv::Scalar(0));
-    cv::resize(red_debug_warning_mask, full_detect_roi,
-               cv::Size(UVC_WIDTH, detect_h), 0, 0, cv::INTER_NEAREST);
-    tx_frame.setTo(cv::Scalar(0, 0, 255), red_debug_full_mask);
 
     // 通过正式色块检测区筛选的区域覆盖为绿色。
     red_debug_full_mask.setTo(cv::Scalar(0));
@@ -1051,9 +1003,7 @@ void VSInference::output_final(bool immediate)
             votes.clear();
             best_w = 0;
             best_label = "";
-            red_warning.store(false, std::memory_order_release);
-            // 目标已完成正式检测流程（结果因冷却丢弃），允许下一目标预警。
-            warning_armed = true;
+            // 冷却期丢弃的结果未对外发布，不重新布防红色预警。
             return;
         }
     }
@@ -1068,8 +1018,8 @@ void VSInference::output_final(bool immediate)
     result_ready = true;
     last_result_time = now;
 
-    // 当前目标已产生投票结果，清除旧事件并允许下一个目标再次触发一次预警。
-    red_warning.store(false, std::memory_order_release);
+    // 只有成功产生投票结果后，才允许下一个目标再次触发一次预警。
+    // 已发布的事件保留到 consume_red_warning()，保证同帧结算时不会丢失预警。
     warning_armed = true;
 
 #if VS_ENABLE_TERMINAL_OUTPUT
@@ -1095,7 +1045,7 @@ void VSInference::output_final(bool immediate)
 // ===================================================================
 void VSInference::draw_guidelines(cv::Mat &src)
 {
-    h_line(src, cfg.by_min, cv::Scalar(0, 0, 255));      // 红色: 预警线/有效区 Y 下界
+    h_line(src, cfg.by_min, cv::Scalar(0, 0, 255));      // 红色: 有效 ROI 区 Y 下界
     h_line(src, cfg.by_max, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 上界
     h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 提前结算线
     const int mode = cx_limit_mode.load(std::memory_order_relaxed);
