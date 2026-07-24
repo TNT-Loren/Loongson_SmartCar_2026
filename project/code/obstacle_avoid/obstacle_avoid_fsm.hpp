@@ -67,5 +67,7 @@ const char *obstacle_avoid_exit_reason_name(ObstacleAvoidExitReason reason);
 
 // 状态 3 沿用原有的可靠边法向偏移，普通巡线偏移仍由 image_test.cpp 管理。
 float obstacle_avoid_edge_midline_offset_px();
+// 状态 3 直接边线预瞄的累计弧长，单位：IPM 像素。
+float obstacle_avoid_edge_lookahead_distance();
 
 #endif

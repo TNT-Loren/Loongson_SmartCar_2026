@@ -1,10 +1,7 @@
-#ifndef __speed_strategy_HPP__
-#define __speed_strategy_HPP__
+#ifndef SPEED_STRATEGY_HPP
+#define SPEED_STRATEGY_HPP
 
 #include "zf_common_headfile.hpp"
-// code/speed_strategy.hpp
-#pragma once
-#include <cstdint>
 
 // 赛道场景枚举
 enum class TrackScene : uint8_t
@@ -21,13 +18,14 @@ enum class TrackScene : uint8_t
 struct TrackInfo
 {
     TrackScene scene = TrackScene::Straight;
-    float deviation = 0.0f;// pure pursuit 角度误差，单位：度，负=左，正=右
+    float deviation = 0.0f; // pure pursuit 角度误差，单位：度，负=左，正=右
 };
 
 extern TrackInfo g_track_info;
 extern float base_start_speed;
 
-extern float k_speed_straight; // aaa
+// 菜单可修改的运行时速度参数；启动默认值见 smartcar_params.hpp。
+extern float k_speed_straight;
 extern float k_speed_curve;
 extern float k_speed_sharp;
 extern float k_speed_obstacle_avoid;
@@ -40,4 +38,4 @@ extern float k_large_alpha_slowdown_deg;
 // 基础速度计算接口
 float calc_base_speed(const TrackInfo &info);
 
-#endif
+#endif // SPEED_STRATEGY_HPP
