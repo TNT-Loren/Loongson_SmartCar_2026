@@ -61,6 +61,38 @@ namespace
     constexpr int k_cross_upper_corner_end_row = MT9V03X_H * 2 / 3;
     constexpr int k_cross_lower_corner_first_row = MT9V03X_H - 15;
     constexpr int k_cross_lower_corner_end_row = MT9V03X_H / 3;
+
+    struct CrossCorner
+    {
+        bool found = false;
+        int row = 0;
+        int col = 0;
+    };
+
+    struct CrossCorners
+    {
+        CrossCorner left_down;
+        CrossCorner left_up;
+        CrossCorner right_down;
+        CrossCorner right_up;
+    };
+
+    // 60 FPS 下约保持 3 帧；只保存十字实际补过的行，不保存整帧识别结果。
+    constexpr auto k_cross_fill_hold_duration = std::chrono::milliseconds{50};
+
+    struct CrossFillHoldState
+    {
+        uint8 left_line[MT9V03X_H] = {0};
+        uint8 right_line[MT9V03X_H] = {0};
+        bool left_modified_rows[MT9V03X_H] = {false};
+        bool right_modified_rows[MT9V03X_H] = {false};
+        ReliableEdgeMode edge_override = ReliableEdgeMode::Auto;
+    };
+
+    CrossCorners g_cross_corners;
+    ReliableEdgeMode g_cross_fill_edge_override = ReliableEdgeMode::Auto;
+    CrossFillHoldState g_cross_fill_hold;
+    MonotonicEventTimer g_cross_fill_hold_timer;
     constexpr uint8 k_search_top_stop_row =
         tracking_param::search_top_stop_row; // 搜到顶行后停止，避免沿顶边爬线
     constexpr uint8 k_start_black_confirm_count =
@@ -76,6 +108,8 @@ namespace
         circle_param::state2_no_monotonicity_timeout_frames;
     constexpr int k_circle_entry_confirm_frames =
         circle_param::entry_confirm_frames;
+    constexpr auto k_circle_state1_to_state2_cooldown =
+        circle_param::state1_to_state2_cooldown;
 
     // 圆环各状态事件的超时参数集中在此，实车标定时可独立修改。
     constexpr auto k_circle_state1_entry_detected_timeout = circle_param::state1_entry_detected_timeout;
@@ -177,6 +211,7 @@ void get_left(uint16 total_L);
 void get_right(uint16 total_R);
 bool Get_K_b(uint8 x1, uint8 y1, uint8 x2, uint8 y2, float *slope_rate, float *intercept);
 void get_turning_point(void);
+void get_cross_turning_point(void);
 void circle_get_turning_point(void); // break_flag 在函数内没有清零，如果以后启用要修。
 void validate_and_count_turn_points(void);
 int Find_Left_Down_Point(int start, int end);
@@ -719,6 +754,14 @@ ReliableEdgeMode effective_ipm_reliable_edge_mode(void)
         {
             return ReliableEdgeMode::Auto;
         }
+    }
+
+    // 十字仅补一侧时，控制与调试都优先使用刚补出的连续边界；
+    // 左右都补或都未补时保持原自动/手动可靠边选择。
+    if (Image_Flag.Cross_Fill != 0 &&
+        g_cross_fill_edge_override != ReliableEdgeMode::Auto)
+    {
+        return g_cross_fill_edge_override;
     }
 
     return g_ipm_reliable_edge_mode;
@@ -2924,9 +2967,8 @@ void get_turning_point(void)
     R_D_corner_row = 0;
     R_D_corner_col = 0;
 
-    for (i = k_cross_upper_corner_first_row;
-         i < k_cross_upper_corner_end_row;
-         i++)//寻找左上拐点
+    // 圆环状态机继续使用旧版角点范围，后续十字调参不修改这里。
+    for (i = 20; i < MT9V03X_H / 2 - 20; i++)//寻找左上拐点
     {
         if(Left_Line[i]<Left_Line[i-10])//上面的值大于该点的值，避免圆环中拐点
         {
@@ -2945,9 +2987,7 @@ void get_turning_point(void)
         }
     }
 
-    for (i = k_cross_upper_corner_first_row;
-         i < k_cross_upper_corner_end_row;
-         i++)//寻找右上拐点
+    for (i = 20; i < MT9V03X_H / 2 - 20; i++)//寻找右上拐点
     {
         if(Right_Line[i]>Right_Line[i-10])
         {
@@ -2965,9 +3005,7 @@ void get_turning_point(void)
         }
     }
 
-    for (i = k_cross_lower_corner_first_row;
-         i > k_cross_lower_corner_end_row;
-         i--)//寻找左下拐点
+    for (i = MT9V03X_H - 15; i > MT9V03X_H / 2 - 20; i--)//寻找左下拐点
     {
 
         if ((abs(Left_Line[i] - Left_Line[i + 1]) <= 5)
@@ -2983,9 +3021,7 @@ void get_turning_point(void)
         }
     }
 
-    for (i = k_cross_lower_corner_first_row;
-         i > k_cross_lower_corner_end_row;
-         i--)//寻找右下拐点
+    for (i = MT9V03X_H - 15; i > MT9V03X_H / 2 - 20; i--)//寻找右下拐点
     {
 
         if ((abs(Right_Line[i] - Right_Line[i + 1]) <= 5)
@@ -3031,6 +3067,85 @@ void get_turning_point(void)
     if(L_D_corner_flag ==1) turn_point_num ++;
     if(R_D_corner_flag ==1) turn_point_num ++;
 
+}
+
+// 十字专用拐点检测。只写 g_cross_corners，不修改圆环状态机使用的四个公共角点。
+void get_cross_turning_point(void)
+{
+    g_cross_corners = {};
+
+    for (int i = k_cross_upper_corner_first_row;
+         i < k_cross_upper_corner_end_row;
+         ++i)
+    {
+        if (Left_Line[i] < Left_Line[i - 10] &&
+            std::abs(Left_Line[i] - Left_Line[i - 1]) <= 5 &&
+            std::abs(Left_Line[i - 1] - Left_Line[i - 2]) <= 5 &&
+            std::abs(Left_Line[i - 2] - Left_Line[i - 3]) <= 3 &&
+            Left_Line[i] - Left_Line[i + 3] >= 8 &&
+            Left_Line[i + 2] - Left_Line[i + 3] <= 3)
+        {
+            g_cross_corners.left_up = {true, i, Left_Line[i]};
+            break;
+        }
+    }
+
+    for (int i = k_cross_upper_corner_first_row;
+         i < k_cross_upper_corner_end_row;
+         ++i)
+    {
+        if (Right_Line[i] > Right_Line[i - 10] &&
+            std::abs(Right_Line[i] - Right_Line[i - 1]) <= 5 &&
+            std::abs(Right_Line[i - 1] - Right_Line[i - 2]) <= 5 &&
+            std::abs(Right_Line[i - 2] - Right_Line[i - 3]) <= 3 &&
+            Right_Line[i + 3] - Right_Line[i] >= 8 &&
+            Right_Line[i + 2] - Right_Line[i + 3] <= 3)
+        {
+            g_cross_corners.right_up = {true, i, Right_Line[i]};
+            break;
+        }
+    }
+
+    for (int i = k_cross_lower_corner_first_row;
+         i > k_cross_lower_corner_end_row;
+         --i)
+    {
+        if (std::abs(Left_Line[i] - Left_Line[i + 1]) <= 5 &&
+            std::abs(Left_Line[i + 1] - Left_Line[i + 2]) <= 5 &&
+            std::abs(Left_Line[i + 2] - Left_Line[i + 3]) <= 3 &&
+            Left_Line[i] - Left_Line[i - 3] >= 8)
+        {
+            g_cross_corners.left_down = {true, i, Left_Line[i]};
+            break;
+        }
+    }
+
+    for (int i = k_cross_lower_corner_first_row;
+         i > k_cross_lower_corner_end_row;
+         --i)
+    {
+        if (std::abs(Right_Line[i] - Right_Line[i + 1]) <= 5 &&
+            std::abs(Right_Line[i + 1] - Right_Line[i + 2]) <= 5 &&
+            std::abs(Right_Line[i + 2] - Right_Line[i + 3]) <= 3 &&
+            Right_Line[i - 3] - Right_Line[i] >= 8)
+        {
+            g_cross_corners.right_down = {true, i, Right_Line[i]};
+            break;
+        }
+    }
+
+    if (g_cross_corners.left_down.found &&
+        g_cross_corners.left_up.found &&
+        g_cross_corners.left_down.row < g_cross_corners.left_up.row)
+    {
+        g_cross_corners.left_down = {};
+    }
+    if (g_cross_corners.right_down.found &&
+        g_cross_corners.right_up.found &&
+        g_cross_corners.right_down.row < g_cross_corners.right_up.row)
+    {
+        g_cross_corners.right_down = {};
+    }
 }
 
 void validate_and_count_turn_points(void)
@@ -3852,7 +3967,7 @@ void Island_Detect(void)//环岛检测
         // 绕行会主动改变可靠边和中线偏移，期间的边线形态不能用于新建圆环状态。
         // 此限制只放在状态 0；如果绕行前已在圆环内，状态 1~6 仍继续推进。
         const bool obstacle_avoid_blocks_entry = obstacle_avoid_active();
-        if(Image_Flag.Cross_Fill!=0 || cooldown_active || obstacle_avoid_blocks_entry)
+        if(cooldown_active || obstacle_avoid_blocks_entry)
         {
             g_left_circle_entry_candidate_frames = 0;
             g_right_circle_entry_candidate_frames = 0;
@@ -3921,7 +4036,9 @@ void Island_Detect(void)//环岛检测
                 //注意补线要稍微避开拐点
                 Left_Add_Line(left_down_guai[1]+1,left_down_guai[0]-1,left_down_guai[1]+30,0);
             }
-            else if(L_D_corner_flag==0&&continuity_change_left_flag-monotonicity_change_left_flag>5)
+            else if(L_D_corner_flag==0&&
+                    continuity_change_left_flag-monotonicity_change_left_flag>5&&
+                    g_circle_state_event_timer.expired(k_circle_state1_to_state2_cooldown, now))
             {
                 set_circle_state(2, now);
             }
@@ -4098,7 +4215,9 @@ void Island_Detect(void)//环岛检测
             {
                 Right_Add_Line(right_down_guai[1]-1,right_down_guai[0]-1,right_down_guai[1]-30,0);
             }
-            else if(R_D_corner_flag==0&&continuity_change_right_flag-monotonicity_change_right_flag> 5)
+            else if(R_D_corner_flag==0&&
+                    continuity_change_right_flag-monotonicity_change_right_flag>5&&
+                    g_circle_state_event_timer.expired(k_circle_state1_to_state2_cooldown, now))
             {
                 set_circle_state(2, now);
             }
@@ -4280,6 +4399,104 @@ void Island_Detect(void)//环岛检测
 
 
 
+namespace
+{
+void clear_cross_fill_hold(void)
+{
+    g_cross_fill_hold = CrossFillHoldState{};
+    g_cross_fill_hold_timer.reset();
+}
+
+void save_cross_fill_hold(const bool left_modified_rows[MT9V03X_H],
+                          const bool right_modified_rows[MT9V03X_H])
+{
+    std::memcpy(g_cross_fill_hold.left_line, Left_Line, sizeof(Left_Line));
+    std::memcpy(g_cross_fill_hold.right_line, Right_Line, sizeof(Right_Line));
+    std::memcpy(g_cross_fill_hold.left_modified_rows,
+                left_modified_rows,
+                sizeof(g_cross_fill_hold.left_modified_rows));
+    std::memcpy(g_cross_fill_hold.right_modified_rows,
+                right_modified_rows,
+                sizeof(g_cross_fill_hold.right_modified_rows));
+    g_cross_fill_hold.edge_override = g_cross_fill_edge_override;
+    g_cross_fill_hold_timer.start();
+}
+
+bool apply_cross_fill_hold(void)
+{
+    const auto now = MonotonicEventTimer::Clock::now();
+    if (!g_cross_fill_hold_timer.running() ||
+        g_cross_fill_hold_timer.expired(k_cross_fill_hold_duration, now))
+    {
+        clear_cross_fill_hold();
+        return false;
+    }
+
+    // 正常双边界已经恢复时立即退出保持，避免十字结果延续到普通赛道。
+    if (Left_Lost_Time <= k_lost_line_count_threshold &&
+        Right_Lost_Time <= k_lost_line_count_threshold)
+    {
+        clear_cross_fill_hold();
+        return false;
+    }
+
+    uint8 saved_left_line[MT9V03X_H];
+    uint8 saved_right_line[MT9V03X_H];
+    std::memcpy(saved_left_line, Left_Line, sizeof(saved_left_line));
+    std::memcpy(saved_right_line, Right_Line, sizeof(saved_right_line));
+
+    bool copied_left = false;
+    bool copied_right = false;
+    bool copied_rows[MT9V03X_H] = {false};
+    for (int row = 0; row < MT9V03X_H; ++row)
+    {
+        // 只填当前帧仍是搜线哨兵值的边界，绝不覆盖当前帧已经找到的真实边线。
+        if (g_cross_fill_hold.left_modified_rows[row] && Left_Line[row] <= 2)
+        {
+            Left_Line[row] = g_cross_fill_hold.left_line[row];
+            copied_left = true;
+            copied_rows[row] = true;
+        }
+        if (g_cross_fill_hold.right_modified_rows[row] && Right_Line[row] >= MT9V03X_W - 3)
+        {
+            Right_Line[row] = g_cross_fill_hold.right_line[row];
+            copied_right = true;
+            copied_rows[row] = true;
+        }
+    }
+
+    if (!copied_left && !copied_right)
+    {
+        return false;
+    }
+
+    for (int row = 0; row < MT9V03X_H; ++row)
+    {
+        if (copied_rows[row] && Left_Line[row] >= Right_Line[row])
+        {
+            std::memcpy(Left_Line, saved_left_line, sizeof(saved_left_line));
+            std::memcpy(Right_Line, saved_right_line, sizeof(saved_right_line));
+            clear_cross_fill_hold();
+            return false;
+        }
+    }
+
+    // 保持帧若只补一侧，可靠边继续选择这条刚补出的连续边界。
+    if (copied_left != copied_right)
+    {
+        g_cross_fill_edge_override = copied_left
+            ? ReliableEdgeMode::ForceLeft
+            : ReliableEdgeMode::ForceRight;
+    }
+    else
+    {
+        g_cross_fill_edge_override = g_cross_fill_hold.edge_override;
+    }
+    Image_Flag.Cross_Fill = 4;
+    return true;
+}
+}
+
 // 十字补线：当前帧满足双边丢线和拐点组合时，按直线重建左右边界。
 void Cross_fill(void)
 {
@@ -4289,8 +4506,31 @@ void Cross_fill(void)
     constexpr int k_min_completed_x = Border_Min + 2;
     constexpr int k_max_completed_x = Border_Max - 2;
 
+    const CrossCorner &left_down = g_cross_corners.left_down;
+    const CrossCorner &left_up = g_cross_corners.left_up;
+    const CrossCorner &right_down = g_cross_corners.right_down;
+    const CrossCorner &right_up = g_cross_corners.right_up;
+
+    const bool three_corner_combination =
+        (left_down.found && left_up.found && !right_down.found && right_up.found) || // 1101
+        (!left_down.found && left_up.found && right_down.found && right_up.found) || // 0111
+        (left_down.found && left_up.found && right_down.found && !right_up.found) || // 1110
+        (left_down.found && !left_up.found && right_down.found && right_up.found);   // 1011
+
     Image_Flag.Cross_Fill = false;
-    if (get_lost_line() != 1)
+    g_cross_fill_edge_override = ReliableEdgeMode::Auto;
+    if (Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0)
+    {
+        return;
+    }
+
+    const bool full_fill_allowed = get_lost_line() == 1;
+    const bool single_side_fallback_allowed =
+        three_corner_combination &&
+        (Left_Lost_Time > k_lost_line_count_threshold ||
+         Right_Lost_Time > k_lost_line_count_threshold);
+    // 完整补线仍要求双边丢线；只有明确的三点组合允许在单边丢线时降级到 /3。
+    if (!full_fill_allowed && !single_side_fallback_allowed)
     {
         return;
     }
@@ -4301,6 +4541,10 @@ void Cross_fill(void)
     std::memcpy(saved_right_line, Right_Line, sizeof(saved_right_line));
 
     bool modified_rows[MT9V03X_H] = {false};
+    bool left_modified_rows[MT9V03X_H] = {false};
+    bool right_modified_rows[MT9V03X_H] = {false};
+    bool left_boundary_modified = false;
+    bool right_boundary_modified = false;
     auto fill_boundary = [&](uint8 boundary[MT9V03X_H],
                              int source_row_a,
                              int source_row_b,
@@ -4317,9 +4561,25 @@ void Cross_fill(void)
             k_max_completed_x);
         if (filled)
         {
+            if (boundary == Left_Line)
+            {
+                left_boundary_modified = true;
+            }
+            else if (boundary == Right_Line)
+            {
+                right_boundary_modified = true;
+            }
             for (int row = first_fill_row; row <= last_fill_row; ++row)
             {
                 modified_rows[row] = true;
+                if (boundary == Left_Line)
+                {
+                    left_modified_rows[row] = true;
+                }
+                else
+                {
+                    right_modified_rows[row] = true;
+                }
             }
         }
         return filled;
@@ -4341,72 +4601,99 @@ void Cross_fill(void)
     bool fill_attempted = true;
     bool fill_success = false;
     uint8 cross_fill_mode = 1;
+    uint8 *same_side_fallback_boundary = nullptr;
+    const CrossCorner *same_side_fallback_up = nullptr;
+    const CrossCorner *same_side_fallback_down = nullptr;
 
-    if (L_D_corner_flag && L_U_corner_flag && R_D_corner_flag && R_U_corner_flag) // 1111
+    if (left_down.found && left_up.found && right_down.found && right_up.found) // 1111
     {
         fill_success =
-            fill_boundary(Left_Line, L_U_corner_row, L_D_corner_row,
-                          L_U_corner_row, L_D_corner_row) &&
-            fill_boundary(Right_Line, R_U_corner_row, R_D_corner_row,
-                          R_U_corner_row, R_D_corner_row);
+            fill_boundary(Left_Line, left_up.row, left_down.row,
+                          left_up.row, left_down.row) &&
+            fill_boundary(Right_Line, right_up.row, right_down.row,
+                          right_up.row, right_down.row);
     }
-    else if (L_D_corner_flag && L_U_corner_flag && !R_D_corner_flag && R_U_corner_flag) // 1101
+    else if (left_down.found && left_up.found && !right_down.found && right_up.found) // 1101
     {
-        fill_success =
-            fill_boundary(Left_Line, L_U_corner_row, L_D_corner_row,
-                          L_U_corner_row, L_D_corner_row) &&
-            fill_boundary(Right_Line,
-                          upper_source_far_row(R_U_corner_row),
-                          upper_source_near_row(R_U_corner_row),
-                          R_U_corner_row,
-                          k_fill_bottom_row);
+        same_side_fallback_boundary = Left_Line;
+        same_side_fallback_up = &left_up;
+        same_side_fallback_down = &left_down;
+        if (full_fill_allowed)
+        {
+            fill_success =
+                fill_boundary(Left_Line, left_up.row, left_down.row,
+                              left_up.row, left_down.row) &&
+                fill_boundary(Right_Line,
+                              upper_source_far_row(right_up.row),
+                              upper_source_near_row(right_up.row),
+                              right_up.row,
+                              k_fill_bottom_row);
+        }
     }
-    else if (!L_D_corner_flag && L_U_corner_flag && R_D_corner_flag && R_U_corner_flag) // 0111
+    else if (!left_down.found && left_up.found && right_down.found && right_up.found) // 0111
     {
-        fill_success =
-            fill_boundary(Left_Line,
-                          upper_source_far_row(L_U_corner_row),
-                          upper_source_near_row(L_U_corner_row),
-                          L_U_corner_row,
-                          k_fill_bottom_row) &&
-            fill_boundary(Right_Line, R_U_corner_row, R_D_corner_row,
-                          R_U_corner_row, R_D_corner_row);
+        same_side_fallback_boundary = Right_Line;
+        same_side_fallback_up = &right_up;
+        same_side_fallback_down = &right_down;
+        if (full_fill_allowed)
+        {
+            fill_success =
+                fill_boundary(Left_Line,
+                              upper_source_far_row(left_up.row),
+                              upper_source_near_row(left_up.row),
+                              left_up.row,
+                              k_fill_bottom_row) &&
+                fill_boundary(Right_Line, right_up.row, right_down.row,
+                              right_up.row, right_down.row);
+        }
     }
-    else if (L_D_corner_flag && L_U_corner_flag && R_D_corner_flag && !R_U_corner_flag) // 1110
+    else if (left_down.found && left_up.found && right_down.found && !right_up.found) // 1110
     {
-        fill_success =
-            fill_boundary(Left_Line, L_U_corner_row, L_D_corner_row,
-                          L_U_corner_row, L_D_corner_row) &&
-            fill_boundary(Right_Line,
-                          lower_source_near_row(R_D_corner_row),
-                          lower_source_far_row(R_D_corner_row),
-                          k_fill_top_row,
-                          R_D_corner_row);
+        same_side_fallback_boundary = Left_Line;
+        same_side_fallback_up = &left_up;
+        same_side_fallback_down = &left_down;
+        if (full_fill_allowed)
+        {
+            fill_success =
+                fill_boundary(Left_Line, left_up.row, left_down.row,
+                              left_up.row, left_down.row) &&
+                fill_boundary(Right_Line,
+                              lower_source_near_row(right_down.row),
+                              lower_source_far_row(right_down.row),
+                              k_fill_top_row,
+                              right_down.row);
+        }
     }
-    else if (L_D_corner_flag && !L_U_corner_flag && R_D_corner_flag && R_U_corner_flag) // 1011
+    else if (left_down.found && !left_up.found && right_down.found && right_up.found) // 1011
     {
-        fill_success =
-            fill_boundary(Left_Line,
-                          lower_source_near_row(L_D_corner_row),
-                          lower_source_far_row(L_D_corner_row),
-                          k_fill_top_row,
-                          L_D_corner_row) &&
-            fill_boundary(Right_Line, R_U_corner_row, R_D_corner_row,
-                          R_U_corner_row, R_D_corner_row);
+        same_side_fallback_boundary = Right_Line;
+        same_side_fallback_up = &right_up;
+        same_side_fallback_down = &right_down;
+        if (full_fill_allowed)
+        {
+            fill_success =
+                fill_boundary(Left_Line,
+                              lower_source_near_row(left_down.row),
+                              lower_source_far_row(left_down.row),
+                              k_fill_top_row,
+                              left_down.row) &&
+                fill_boundary(Right_Line, right_up.row, right_down.row,
+                              right_up.row, right_down.row);
+        }
     }
-    else if (!L_D_corner_flag && L_U_corner_flag && !R_D_corner_flag && R_U_corner_flag) // 0101
+    else if (!left_down.found && left_up.found && !right_down.found && right_up.found) // 0101
     {
         cross_fill_mode = 2;
         fill_success =
             fill_boundary(Left_Line,
-                          upper_source_far_row(L_U_corner_row),
-                          upper_source_near_row(L_U_corner_row),
-                          L_U_corner_row,
+                          upper_source_far_row(left_up.row),
+                          upper_source_near_row(left_up.row),
+                          left_up.row,
                           k_fill_bottom_row) &&
             fill_boundary(Right_Line,
-                          upper_source_far_row(R_U_corner_row),
-                          upper_source_near_row(R_U_corner_row),
-                          R_U_corner_row,
+                          upper_source_far_row(right_up.row),
+                          upper_source_near_row(right_up.row),
+                          right_up.row,
                           k_fill_bottom_row);
     }
     else
@@ -4414,16 +4701,53 @@ void Cross_fill(void)
         fill_attempted = false;
     }
 
-    if (fill_success)
-    {
+    auto modified_boundaries_are_valid = [&]() {
         for (int row = 0; row < MT9V03X_H; ++row)
         {
             if (modified_rows[row] && Left_Line[row] >= Right_Line[row])
             {
-                fill_success = false;
-                break;
+                return false;
             }
         }
+        return true;
+    };
+
+    if (fill_success && !modified_boundaries_are_valid())
+    {
+        fill_success = false;
+    }
+
+    // 三点完整补线失败时，只保留有上下两个角点的可靠侧。先恢复原边界，
+    // 再单独连接同侧角点，避免完整尝试留下半条线或污染另一侧。
+    if (fill_attempted && !fill_success &&
+        same_side_fallback_boundary != nullptr &&
+        same_side_fallback_up != nullptr &&
+        same_side_fallback_down != nullptr)
+    {
+        std::memcpy(Left_Line, saved_left_line, sizeof(saved_left_line));
+        std::memcpy(Right_Line, saved_right_line, sizeof(saved_right_line));
+        for (bool &modified : modified_rows)
+        {
+            modified = false;
+        }
+        for (bool &modified : left_modified_rows)
+        {
+            modified = false;
+        }
+        for (bool &modified : right_modified_rows)
+        {
+            modified = false;
+        }
+        left_boundary_modified = false;
+        right_boundary_modified = false;
+
+        cross_fill_mode = 3;
+        fill_success = fill_boundary(same_side_fallback_boundary,
+                                     same_side_fallback_up->row,
+                                     same_side_fallback_down->row,
+                                     same_side_fallback_up->row,
+                                     same_side_fallback_down->row) &&
+                       modified_boundaries_are_valid();
     }
 
     if (!fill_attempted || !fill_success)
@@ -4433,7 +4757,14 @@ void Cross_fill(void)
         return;
     }
 
+    if (left_boundary_modified != right_boundary_modified)
+    {
+        g_cross_fill_edge_override = left_boundary_modified
+            ? ReliableEdgeMode::ForceLeft
+            : ReliableEdgeMode::ForceRight;
+    }
     Image_Flag.Cross_Fill = cross_fill_mode;
+    save_cross_fill_hold(left_modified_rows, right_modified_rows);
 }
 
 
@@ -4523,7 +4854,8 @@ void Image_Process(void)
         get_left(data_stastics_l);		//取出边界
         get_right(data_stastics_r);
 
-        get_turn_point();//获取拐点（突变点或向量法）
+        get_turn_point();//圆环沿用原有公共拐点（突变点或向量法）
+        get_cross_turning_point();//十字使用独立拐点，后续调参不影响圆环
 //        get_right_cusp_point();
 //        get_left_cusp_point();
         get_lost_line();						//找左右丢线行数
@@ -4540,14 +4872,48 @@ void Image_Process(void)
 //        }
         if(mcx.start_finish == false)
         {
-            Cross_fill();							//十字补线
-//            circle_test();
+            // 圆环先读取未经十字修改的原始边界。入口连续确认、活动状态和退出冷却
+            // 都拥有本帧控制权，避免十字补线打断圆环的三帧入口确认。
+            Image_Flag.Cross_Fill = false;
+            const bool circle_was_active =
+                Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0;
             Island_Detect();
+
+            const bool circle_owns_frame =
+                circle_was_active ||
+                Image_Flag.Left_Circle || Image_Flag.Right_Circle || island_state != 0 ||
+                g_left_circle_entry_candidate_frames > 0 ||
+                g_right_circle_entry_candidate_frames > 0 ||
+                g_circle_normal_exit_cooldown_timer.running();
+            const bool higher_priority_element_owns_frame =
+                circle_owns_frame || obstacle_avoid_active();
+            if (higher_priority_element_owns_frame)
+            {
+                // 圆环（含候选/退出冷却）和避障优先级都高于十字，进入即清除保持。
+                clear_cross_fill_hold();
+            }
+            else
+            {
+                Cross_fill();						//圆环未占用时才允许十字补线
+                if (Image_Flag.Cross_Fill == 0)
+                {
+                    apply_cross_fill_hold();
+                }
+            }
+//            circle_test();
+        }
+        else
+        {
+            clear_cross_fill_hold();
         }
 
         // test1 = static_cast<float>(island_state);                     // 圆环状态机当前状态
         // test2 = static_cast<float>(continuity_change_left_flag);       // 左圆环左边界连续性变化行
         // test3 = static_cast<float>(monotonicity_change_left_flag);     // 左圆环左边界单调性变化行
+    }
+    else
+    {
+        clear_cross_fill_hold();
     }
 //		Left_Add_Line(1,MT9V03X_H-5,MT9V03X_W-1,0);
     for (i = 0; i <  MT9V03X_H; i++)
@@ -4732,6 +5098,28 @@ void draw_composite_normal_view(uint16 (*img)[image_width],
         draw_debug_scaled_point(img, dst_x, dst_y, dst_w, dst_h, right_edge_line[row], row, right_color);
         draw_debug_scaled_point(img, dst_x, dst_y, dst_w, dst_h, mid_line[row], row, mid_color);
     }
+
+    // 仅在默认混合图传上标记已有的十字拐点；不重新检测，不回写视觉或控制数据。
+    if (!Image_Flag.Left_Circle && !Image_Flag.Right_Circle)
+    {
+        auto draw_corner = [&](int src_x, int src_y, uint16 color) {
+            const int x = dst_x + src_x * dst_w / image_width;
+            const int y = dst_y + src_y * dst_h / image_height;
+            dbg_circle(img, x, y, 3, color);
+        };
+        if (g_cross_corners.left_up.found)
+            draw_corner(g_cross_corners.left_up.col, g_cross_corners.left_up.row,
+                        debug_color(RGB565_YELLOW));
+        if (g_cross_corners.left_down.found)
+            draw_corner(g_cross_corners.left_down.col, g_cross_corners.left_down.row,
+                        debug_color(RGB565_PINK));
+        if (g_cross_corners.right_up.found)
+            draw_corner(g_cross_corners.right_up.col, g_cross_corners.right_up.row,
+                        debug_color(RGB565_CYAN));
+        if (g_cross_corners.right_down.found)
+            draw_corner(g_cross_corners.right_down.col, g_cross_corners.right_down.row,
+                        debug_color(RGB565_BROWN));
+    }
 }
 
 void draw_composite_ipm_view(uint16 (*img)[image_width],
@@ -4909,10 +5297,10 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
         std::snprintf(cross_text,
                       sizeof(cross_text),
                       "X:%d%d%d%d/%u",
-                      L_D_corner_flag != 0,
-                      L_U_corner_flag != 0,
-                      R_D_corner_flag != 0,
-                      R_U_corner_flag != 0,
+                      g_cross_corners.left_down.found,
+                      g_cross_corners.left_up.found,
+                      g_cross_corners.right_down.found,
+                      g_cross_corners.right_up.found,
                       static_cast<unsigned>(Image_Flag.Cross_Fill));
         dbg_text_3x5(img, x + 2, y + 9, cross_text, state_color, bg_color, true);
     }
@@ -4920,6 +5308,13 @@ void draw_composite_status_panel(uint16 (*img)[image_width], int x, int y, int w
     draw_lost_bar(img, x + 2, y + 20, "L", Left_Lost_Time, left_color, text_color, bg_color);
     draw_lost_bar(img, x + 2, y + 27, "R", Right_Lost_Time, right_color, text_color, bg_color);
     draw_lost_bar(img, x + 2, y + 34, "B", Both_Lost_Time, both_color, text_color, bg_color);
+    // 进度条显示比例，右侧数字直接显示当前左右边线的实际丢线行数。
+    char left_lost_text[12] = {0};
+    char right_lost_text[12] = {0};
+    std::snprintf(left_lost_text, sizeof(left_lost_text), "L:%d", Left_Lost_Time);
+    std::snprintf(right_lost_text, sizeof(right_lost_text), "R:%d", Right_Lost_Time);
+    dbg_text_3x5(img, x + 42, y + 20, left_lost_text, left_color, bg_color, true);
+    dbg_text_3x5(img, x + 42, y + 27, right_lost_text, right_color, bg_color, true);
     if (is_lost_line())
     {
         dbg_text_3x5(img, x + 2, y + 43, "FLOS", lost_color, bg_color, true);
@@ -5096,21 +5491,21 @@ void draw_debug_corners(uint16 (*img)[image_width])
 
     const bool circle_active = Image_Flag.Left_Circle || Image_Flag.Right_Circle;
 
-    if (!circle_active && L_U_corner_flag)
+    if (!circle_active && g_cross_corners.left_up.found)
     {
-        dbg_rect(img, L_U_corner_col, L_U_corner_row, 4, left_up_color);
+        dbg_rect(img, g_cross_corners.left_up.col, g_cross_corners.left_up.row, 4, left_up_color);
     }
-    if (!circle_active && L_D_corner_flag)
+    if (!circle_active && g_cross_corners.left_down.found)
     {
-        dbg_rect(img, L_D_corner_col, L_D_corner_row, 4, left_down_color);
+        dbg_rect(img, g_cross_corners.left_down.col, g_cross_corners.left_down.row, 4, left_down_color);
     }
-    if (!circle_active && R_U_corner_flag)
+    if (!circle_active && g_cross_corners.right_up.found)
     {
-        dbg_rect(img, R_U_corner_col, R_U_corner_row, 4, right_up_color);
+        dbg_rect(img, g_cross_corners.right_up.col, g_cross_corners.right_up.row, 4, right_up_color);
     }
-    if (!circle_active && R_D_corner_flag)
+    if (!circle_active && g_cross_corners.right_down.found)
     {
-        dbg_rect(img, R_D_corner_col, R_D_corner_row, 4, right_down_color);
+        dbg_rect(img, g_cross_corners.right_down.col, g_cross_corners.right_down.row, 4, right_down_color);
     }
 
     if (circle_active && left_down_guai[0] >= 5)
@@ -5358,6 +5753,10 @@ namespace
 // 每帧处理前重置边界/中线为安全默认值，避免沿用上一帧脏数据。
 void reset_track_lines(void)
 {
+    g_cross_corners = {};
+    Image_Flag.Cross_Fill = false;
+    g_cross_fill_edge_override = ReliableEdgeMode::Auto;
+    // 不在逐帧重置中清除 g_cross_fill_hold；它只由超时、恢复正常或高优先级元素清除。
     for (int row = 0; row < image_height; ++row)
     {
         Left_Line[row] = k_default_left;
@@ -5397,6 +5796,10 @@ bool image_test(void)
 
     if (uvc_dev.wait_image_refresh() < 0)
     {
+        {
+            std::lock_guard<std::mutex> lock(g_image_mutex);
+            clear_cross_fill_hold();
+        }
         lost_frame_count++;
         std::cout << "摄像头采集异常，连续丢帧: " << static_cast<int>(lost_frame_count) << std::endl;
         if (lost_frame_count >= k_max_lost_frame_count)
@@ -5413,6 +5816,7 @@ bool image_test(void)
     {
         std::lock_guard<std::mutex> lock(g_image_mutex);
         reset_track_lines();//
+        clear_cross_fill_hold();
         return false;//图像异常，跳出循环，保持上次结果不变，等待下一帧图像
     }
 

@@ -40,7 +40,7 @@ extern std::mutex g_vision_result_mutex;   // 视觉结果互斥锁（保护偏�
 // ============================================================
 typedef struct
 {
-    uint8 Cross_Fill;          // 十字路口标志
+    uint8 Cross_Fill;          // 十字补线：0=无，1=完整，2=仅双上角，3=三点单侧兜底，4=短时保持
     uint8 Lose_Line_R;         // 右边界丢失标志
     uint8 Lose_Line_L;         // 左边界丢失标志
     bool Left_Circle;          // 左环岛标志

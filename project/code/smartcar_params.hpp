@@ -10,21 +10,21 @@ namespace smartcar::params
 namespace speed
 {
 // 各赛道场景的默认目标轮速。运行时会复制到可由菜单修改的变量中。
-inline constexpr float straight_target = 130.0*1.1f;
-inline constexpr float gentle_curve_target = 110.0 * 1.1f;
-inline constexpr float sharp_curve_target = 100.0*1.1f;
-inline constexpr float obstacle_avoid_target = 70.0*1.1f;
-inline constexpr float circle_target = 125.0*1.1f;
-inline constexpr float lost_line_target = 110.0f * 1.1;
-// inline constexpr float straight_target = 130.0*0.8f;
+inline constexpr float straight_target = 130.0*1.2f;
+inline constexpr float gentle_curve_target = 110.0 * 1.2f;
+inline constexpr float sharp_curve_target = 100.0*1.2f;
+inline constexpr float obstacle_avoid_target = 70.0*1.2f;
+inline constexpr float circle_target = 125.0*1.2f;
+inline constexpr float lost_line_target = 110.0f * 1.2;
+// inline constexpr float straight_target = 130.0f;
 // inline constexpr float gentle_curve_target = 110.0 * 0.8f;
 // inline constexpr float sharp_curve_target = 100.0*0.8f;
 // inline constexpr float obstacle_avoid_target = 70.0*0.8f;
-// inline constexpr float circle_target = 125.0 * 0.8f;
+// inline constexpr float circle_target = 120.0 * 0.8f;
 // inline constexpr float lost_line_target = 110.0 * 0.8f;
 
 inline constexpr float initial_target = 100.0f;//起步速度
-inline constexpr float acceleration_step = 15.0f;//升
+inline constexpr float acceleration_step = 25.0f;//升
 inline constexpr float deceleration_step = 25.0f;
 inline constexpr float large_alpha_slowdown_threshold_deg = 25.0f;
 
@@ -40,7 +40,7 @@ namespace obstacle
 {
 // 减速及等待分类阶段。
 //状态一：
-inline constexpr float decelerate_target_speed = -120.0f;//制动目标速度
+inline constexpr float decelerate_target_speed = -200.0f;//制动目标速度
 inline constexpr float decelerate_exit_speed = 10.0f;//制动完成阈值
 inline constexpr float warning_hold_speed = 20.0f;//低速行驶
 inline constexpr auto warning_result_timeout = std::chrono::milliseconds{2000};//等待分类超时
@@ -57,7 +57,7 @@ inline constexpr auto turn_timeout = std::chrono::milliseconds{1000};//转向超
 
 // 沿边绕行及安全超时。
 inline constexpr bool use_edge_forward_preview = true;
-inline constexpr float edge_lookahead_distance_px = 15.0f;
+inline constexpr float edge_lookahead_distance_px = 13.0f;
 inline constexpr float edge_midline_offset_px = -5.0f;
 inline constexpr auto edge_follow_duration = std::chrono::milliseconds{1000};
 inline constexpr auto reentry_cooldown = std::chrono::milliseconds{500};
@@ -96,6 +96,8 @@ inline constexpr int right_short_column_fallback_x = 99;
 inline constexpr int short_column_fallback_y = 20;
 inline constexpr int state2_no_monotonicity_timeout_frames = 20;
 inline constexpr int entry_confirm_frames = 3;
+inline constexpr auto state1_to_state2_cooldown =
+    std::chrono::milliseconds{50};//由状态一到状态二的冷却时间
 
 inline constexpr auto state1_entry_detected_timeout =
     std::chrono::milliseconds{4000};
@@ -147,17 +149,17 @@ struct PurePursuitSetting
     float max_alpha_deg;
 };
 
-// inline constexpr PurePursuitSetting straight_pursuit{57.2f, 35.0f};
-// inline constexpr PurePursuitSetting gentle_curve_pursuit{54.0f, 40.0f};
-// inline constexpr PurePursuitSetting sharp_curve_pursuit{50.0f, 45.0f};
+// inline constexpr PurePursuitSetting straight_pursuit{40.2f, 35.0f};
+// inline constexpr PurePursuitSetting gentle_curve_pursuit{37.0f, 40.0f};
+// inline constexpr PurePursuitSetting sharp_curve_pursuit{34.0f, 45.0f};
 // inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0f, 90.0f};
 // inline constexpr PurePursuitSetting lost_line_pursuit{57.0f, 20.0f};
 // inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};
 // inline constexpr PurePursuitSetting circle_inside_pursuit{44.0f, 34.0f};
 // inline constexpr PurePursuitSetting circle_exit_pursuit{44.0f, 30.0f};
-inline constexpr PurePursuitSetting straight_pursuit{62.2f, 35.0f};
-inline constexpr PurePursuitSetting gentle_curve_pursuit{60.0f, 40.0f};
-inline constexpr PurePursuitSetting sharp_curve_pursuit{58.0f, 45.0f};
+inline constexpr PurePursuitSetting straight_pursuit{60.2f, 35.0f};
+inline constexpr PurePursuitSetting gentle_curve_pursuit{55.0f, 40.0f};
+inline constexpr PurePursuitSetting sharp_curve_pursuit{53.0f, 45.0f};
 inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0f, 90.0f};
 inline constexpr PurePursuitSetting lost_line_pursuit{65.0f, 15.0f};
 inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};

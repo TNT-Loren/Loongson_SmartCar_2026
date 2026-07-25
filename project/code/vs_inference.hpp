@@ -11,7 +11,7 @@
 // ===================================================================
 // 开关：0=关闭，1=开启
 #define VS_ENABLE_TERMINAL_OUTPUT (0) // 终端打印详细识别日志
-#define VS_ENABLE_GUIDELINES (1)      // VS 彩色调试图中绘制辅助线
+#define VS_ENABLE_GUIDELINES (0)      // VS 彩色调试图中绘制辅助线
 
 // 色块检测：先 HSV 找红色目标，再用 box 框出模型输入 ROI。
 #define VS_COLOR_DETECT_Y_MAX (120) // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算

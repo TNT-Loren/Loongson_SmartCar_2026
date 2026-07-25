@@ -146,44 +146,45 @@ int main(int, char **)
         {
             publish_lost_line_result();
         }
-        fps_timer_end();
-        // ===== VS添加：AI视觉推理 — 复用巡线已抓帧，彩色给AI，不额外等帧 =====
-        if (g_vs_ready)
-        {
-            cv::Mat color_frame = uvc_dev.get_frame_mjpg();
-            if (!g_vs.tick_bgr(color_frame))
-            {
-                printf("vs.tick error\r\n");
-            }
-            else
-            {
-                tcp_camera_update_vs_image();
-            }
-            // 预警必须先于最终分类处理：先建立状态 1，同帧到达的最终结果再确认左右方向。
-            if (g_vs.consume_red_warning())
-            {
-                printf("red warning -> decelerate %s\r\n",
-                       obstacle_avoid_warning_request() ? "accepted" : "ignored");
-            }
-            if (g_vs.consume_new_result(result))
-            {
-                bool result_accepted = false;
-                if (result == "武器")
-                {
-                    result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Left);
-                }
-                else if (result == "物资")
-                {
-                    result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Right);
-                }
-                else
-                {
-                    // 载具、错误等非绕行结果只取消尚在等待分类的状态 1。
-                    result_accepted = obstacle_avoid_cancel_warning();
-                }
-                printf("AI result -> obstacle FSM %s\r\n",
-                       result_accepted ? "accepted" : "ignored");
-            }
+         fps_timer_end();
+        //motor_set_speed(50,50);
+         // ===== VS添加：AI视觉推理 — 复用巡线已抓帧，彩色给AI，不额外等帧 =====
+         if (g_vs_ready)
+         {
+             cv::Mat color_frame = uvc_dev.get_frame_mjpg();
+             if (!g_vs.tick_bgr(color_frame))
+             {
+                 printf("vs.tick error\r\n");
+             }
+             else
+             {
+                 tcp_camera_update_vs_image();
+             }
+             // 预警必须先于最终分类处理：先建立状态 1，同帧到达的最终结果再确认左右方向。
+             if (g_vs.consume_red_warning())
+             {
+                 printf("red warning -> decelerate %s\r\n",
+                        obstacle_avoid_warning_request() ? "accepted" : "ignored");
+             }
+             if (g_vs.consume_new_result(result))
+             {
+                 bool result_accepted = false;
+                 if (result == "武器")
+                 {
+                     result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Left);
+                 }
+                 else if (result == "物资")
+                 {
+                     result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Right);
+                 }
+                 else
+                 {
+                     // 载具、错误等非绕行结果只取消尚在等待分类的状态 1。
+                     result_accepted = obstacle_avoid_cancel_warning();
+                 }
+                 printf("AI result -> obstacle FSM %s\r\n",
+                        result_accepted ? "accepted" : "ignored");
+             }
         }
         // ===== VS添加结束 =====
         if (need_print.load() == 1)
