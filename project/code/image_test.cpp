@@ -78,7 +78,7 @@ namespace
     };
 
     // 60 FPS 下约保持 3 帧；只保存十字实际补过的行，不保存整帧识别结果。
-    constexpr auto k_cross_fill_hold_duration = std::chrono::milliseconds{50};
+    constexpr auto k_cross_fill_hold_duration = std::chrono::milliseconds{100};
 
     struct CrossFillHoldState
     {

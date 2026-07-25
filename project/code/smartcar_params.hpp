@@ -157,9 +157,9 @@ struct PurePursuitSetting
 // inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};
 // inline constexpr PurePursuitSetting circle_inside_pursuit{44.0f, 34.0f};
 // inline constexpr PurePursuitSetting circle_exit_pursuit{44.0f, 30.0f};
-inline constexpr PurePursuitSetting straight_pursuit{60.2f, 35.0f};
-inline constexpr PurePursuitSetting gentle_curve_pursuit{55.0f, 40.0f};
-inline constexpr PurePursuitSetting sharp_curve_pursuit{53.0f, 45.0f};
+inline constexpr PurePursuitSetting straight_pursuit{55.2f, 35.0f};
+inline constexpr PurePursuitSetting gentle_curve_pursuit{48.0f, 40.0f};
+inline constexpr PurePursuitSetting sharp_curve_pursuit{45.0f, 45.0f};
 inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0f, 90.0f};
 inline constexpr PurePursuitSetting lost_line_pursuit{65.0f, 15.0f};
 inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};
