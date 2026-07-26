@@ -15,8 +15,8 @@ static_assert(VS_TRACK_EDGE_X_MIN >= 0 &&
 
 namespace
 {
-// 根据红色矩形的长轴方向和所在半区，返回需要顺时针旋转的角度。
-// 目标是让长轴朝向 ROI 下方：纵向长轴比较上/下，横向长轴比较左/右。
+// 根据红色矩形的长边方向和所在半区，返回需要顺时针旋转的角度。
+// 横向红条只能位于上/下边，纵向红条只能位于左/右边。
 // 只有四个离散结果，避免任意角度旋转带来的插值和仿射计算。
 constexpr int red_down_rotation_degrees(int red_x, int red_y,
                                         int red_width, int red_height,
@@ -25,24 +25,69 @@ constexpr int red_down_rotation_degrees(int red_x, int red_y,
     const int red_center_x2 = red_x * 2 + red_width;
     const int red_center_y2 = red_y * 2 + red_height;
 
-    if (red_height >= red_width)
+    if (red_width > red_height)
     {
-        // 长轴已经纵向：红块在下方保持不变，在上方旋转180度。
+        // 横向长边：已经位于下方时保持不变，位于上方时旋转180度。
         return red_center_y2 >= height ? 0 : 180;
     }
+    if (red_height > red_width)
+    {
+        // 纵向长边：右侧顺时针90度，左侧逆时针90度。
+        return red_center_x2 >= width ? 90 : 270;
+    }
 
-    // 长轴为横向：右侧顺时针90度，左侧顺时针270度，使长轴朝向下方。
-    return red_center_x2 >= width ? 90 : 270;
+    // 接近正方形时长边方向不可靠，使用离 ROI 中心更远的轴判断所在边。
+    const int dx2 = red_center_x2 - width;
+    const int dy2 = red_center_y2 - height;
+    const int abs_dx2 = dx2 >= 0 ? dx2 : -dx2;
+    const int abs_dy2 = dy2 >= 0 ? dy2 : -dy2;
+    if (abs_dy2 >= abs_dx2)
+        return dy2 >= 0 ? 0 : 180;
+    return dx2 >= 0 ? 90 : 270;
 }
 
-static_assert(red_down_rotation_degrees(28, 44, 8, 16, 64, 64) == 0,
+static_assert(red_down_rotation_degrees(12, 48, 40, 8, 64, 64) == 0,
               "bottom red block must not rotate");
-static_assert(red_down_rotation_degrees(44, 28, 16, 8, 64, 64) == 90,
+static_assert(red_down_rotation_degrees(48, 12, 8, 40, 64, 64) == 90,
               "right red block must rotate clockwise");
-static_assert(red_down_rotation_degrees(28, 4, 8, 16, 64, 64) == 180,
+static_assert(red_down_rotation_degrees(12, 8, 40, 8, 64, 64) == 180,
               "top red block must rotate 180 degrees");
-static_assert(red_down_rotation_degrees(4, 28, 16, 8, 64, 64) == 270,
+static_assert(red_down_rotation_degrees(8, 12, 8, 40, 64, 64) == 270,
               "left red block must rotate counter-clockwise");
+
+bool largest_red_component_rect(const cv::Mat &red_mask,
+                                cv::Mat &labels, cv::Mat &stats,
+                                cv::Mat &centroids, cv::Rect &rect)
+{
+    constexpr int kMinDirectionArea = 4;
+    const int component_count = cv::connectedComponentsWithStats(
+        red_mask, labels, stats, centroids, 8, CV_32S);
+
+    int largest_label = -1;
+    int largest_area = 0;
+    for (int label = 1; label < component_count; ++label)
+    {
+        const int area = stats.at<int>(label, cv::CC_STAT_AREA);
+        if (area > largest_area)
+        {
+            largest_area = area;
+            largest_label = label;
+        }
+    }
+
+    if (largest_label < 0 || largest_area < kMinDirectionArea)
+    {
+        rect = cv::Rect();
+        return false;
+    }
+
+    rect = cv::Rect(
+        stats.at<int>(largest_label, cv::CC_STAT_LEFT),
+        stats.at<int>(largest_label, cv::CC_STAT_TOP),
+        stats.at<int>(largest_label, cv::CC_STAT_WIDTH),
+        stats.at<int>(largest_label, cv::CC_STAT_HEIGHT));
+    return true;
+}
 
 int opencv_rotate_code(int degrees)
 {
@@ -607,7 +652,6 @@ void VSInference::process_frame(cv::Mat &src)
     roi_valid = false;
     best_cx = -1;
     best_by = -1;
-    best_red_rect = cv::Rect();
 #if VS_ENABLE_TERMINAL_OUTPUT
     best_area = 0;
 #endif
@@ -627,7 +671,6 @@ void VSInference::process_frame(cv::Mat &src)
         // 按缩放网格边界映射，坐标单位始终是320x240原图像素。
         const int left = sx * UVC_WIDTH / hsv_w;
         const int right = (sx + sw) * UVC_WIDTH / hsv_w - 1;
-        const int top = sy * detect_h / hsv_h;
         const int cx = (left + right) / 2;
         const int by = (sy + sh) * detect_h / hsv_h - 1;
 
@@ -663,7 +706,6 @@ void VSInference::process_frame(cv::Mat &src)
             has_best = true;
             best_cx = cx;
             best_by = by;
-            best_red_rect = cv::Rect(left, top, right - left + 1, by - top + 1);
 #if VS_ENABLE_TERMINAL_OUTPUT
             best_area = area;
 #endif
@@ -737,61 +779,65 @@ void VSInference::process_frame(cv::Mat &src)
         int ys = std::max(0, best_tl.y), ye = std::min(UVC_HEIGHT - 1, best_br.y);
         const cv::Mat cropped_roi = src(cv::Rect(xs, ys, xe - xs + 1, ye - ys + 1));
 
-        // 直接复用主检测已得到的红块最小外接矩形，不再执行一次 HSV。
-        // 矩形各边按实际裁剪尺寸映射到模型 ROI，避免只看中心点导致水平偏移误旋转。
-        const int red_roi_x = std::clamp(
-            (best_red_rect.x - xs) * cfg.box_size / cropped_roi.cols,
-            0, cfg.box_size - 1);
-        const int red_roi_y = std::clamp(
-            (best_red_rect.y - ys) * cfg.box_size / cropped_roi.rows,
-            0, cfg.box_size - 1);
-        const int red_roi_right = std::clamp(
-            (best_red_rect.x + best_red_rect.width - xs) * cfg.box_size /
-                cropped_roi.cols,
-            red_roi_x + 1, cfg.box_size);
-        const int red_roi_bottom = std::clamp(
-            (best_red_rect.y + best_red_rect.height - ys) * cfg.box_size /
-                cropped_roi.rows,
-            red_roi_y + 1, cfg.box_size);
-        const int rotation_degrees = red_down_rotation_degrees(
-            red_roi_x, red_roi_y,
-            red_roi_right - red_roi_x, red_roi_bottom - red_roi_y,
-            cfg.box_size, cfg.box_size);
-
         const bool exact_size =
             cropped_roi.cols == cfg.box_size && cropped_roi.rows == cfg.box_size;
-        if (exact_size && rotation_degrees == 0)
+        if (exact_size)
         {
-            cropped_roi.copyTo(roi);
-        }
-        else if (exact_size)
-        {
-            // 直接从原图 ROI 旋转到模型输入，省掉一次 64x64x3 中间复制。
-            cv::rotate(cropped_roi, roi,
-                       opencv_rotate_code(rotation_degrees));
-        }
-        else if (rotation_degrees == 0)
-        {
-            cv::resize(cropped_roi, roi,
-                       cv::Size(cfg.box_size, cfg.box_size),
-                       0, 0, cv::INTER_LINEAR);
+            cropped_roi.copyTo(roi_resize_buffer);
         }
         else
         {
-            // 靠近图像边界时原始框会被裁短，先缩放到复用缓冲区再旋转。
             cv::resize(cropped_roi, roi_resize_buffer,
                        cv::Size(cfg.box_size, cfg.box_size),
                        0, 0, cv::INTER_LINEAR);
+        }
+
+        // 在完整模型 ROI 上重新执行 HSV 双区间过滤，不使用主检测阶段的降采样矩形。
+        // 最大红色连通域可排除 ROI 内零散红色噪点；方向无效时默认不旋转。
+        cv::cvtColor(roi_resize_buffer, roi_direction_hsv, cv::COLOR_BGR2HSV);
+        cv::inRange(roi_direction_hsv, cfg.hsv1_low, cfg.hsv1_high,
+                    roi_direction_mask1);
+        cv::inRange(roi_direction_hsv, cfg.hsv2_low, cfg.hsv2_high,
+                    roi_direction_mask2);
+        cv::bitwise_or(roi_direction_mask1, roi_direction_mask2,
+                       roi_direction_mask);
+
+        cv::Rect direction_red_rect;
+        const bool direction_valid = largest_red_component_rect(
+            roi_direction_mask, roi_direction_labels, roi_direction_stats,
+            roi_direction_centroids, direction_red_rect);
+        const int rotation_degrees = direction_valid
+                                         ? red_down_rotation_degrees(
+                                               direction_red_rect.x,
+                                               direction_red_rect.y,
+                                               direction_red_rect.width,
+                                               direction_red_rect.height,
+                                               cfg.box_size, cfg.box_size)
+                                         : 0;
+
+        if (rotation_degrees == 0)
+        {
+            roi_resize_buffer.copyTo(roi);
+        }
+        else
+        {
             cv::rotate(roi_resize_buffer, roi,
                        opencv_rotate_code(rotation_degrees));
         }
         roi_valid = !roi.empty();
 
 #if VS_ENABLE_TERMINAL_OUTPUT
-        printf("[ROTATE] red_rect=(%d,%d,%d,%d) clockwise=%d deg\r\n",
-               red_roi_x, red_roi_y,
-               red_roi_right - red_roi_x, red_roi_bottom - red_roi_y,
-               rotation_degrees);
+        if (direction_valid)
+        {
+            printf("[ROTATE] roi_hsv_rect=(%d,%d,%d,%d) clockwise=%d deg\r\n",
+                   direction_red_rect.x, direction_red_rect.y,
+                   direction_red_rect.width, direction_red_rect.height,
+                   rotation_degrees);
+        }
+        else
+        {
+            printf("[ROTATE] no reliable red component in ROI, keep 0 deg\r\n");
+        }
 #endif
 
         // 每轮目标在第一次得到有效 ROI 时立即预警，不再等待顶部预警区命中。
