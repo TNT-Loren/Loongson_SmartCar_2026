@@ -6,8 +6,8 @@
 IncrementalPID pid_left(0.74f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
 IncrementalPID pid_right(0.74f, 0.4f, 0.0f, k_speed_pwm_limit_percent);
 // PositionalPID pid_angle(6.0f, 0.0f, 0.14f, 100.0f, 30.0f);
-PositionalPID pid_angle(5.2f, 0.0f, 0.18f, 100.0f, 30.0f);
-
+//PositionalPID pid_angle(5.2f, 0.0f, 0.18f, 100.0f, 30.0f);
+PositionalPID pid_angle(5.2f, 0.0f, 0.10f, 100.0f, 30.0f);
 /*v
 当你写下 IncrementalPID speed_pid; 的那一瞬间，
 这个函数会自动运行。它负责把所有误差、输出都清零，

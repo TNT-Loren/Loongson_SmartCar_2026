@@ -22,6 +22,10 @@ constexpr float k_speed_tuning_target_max = 250.0f;
 constexpr float k_speed_tuning_gain_max = 20.0f;
 constexpr float k_angle_tuning_target_limit_deg = 180.0f;
 constexpr float k_angle_tuning_steer_limit = 30.0f;
+constexpr float k_vision_steer_normal_rate_per_second = 2000.0f;
+constexpr float k_vision_steer_reversal_rate_per_second = 3500.0f;
+constexpr float k_vision_steer_reversal_threshold = 30.0f;
+float last_vision_control_steer = 0.0f;
 //////////////////////////////////////////////////
 static_assert(!(k_speed_pid_tuning_mode && k_angle_pid_tuning_mode),
               "Only one PID tuning mode can be enabled");
@@ -164,6 +168,7 @@ void master_scheduler_callback()
                 pid_left.clear();
                 pid_right.clear();
                 pid_angle.clear();
+                last_vision_control_steer = 0.0f;
                 motor_set_speed(0, 0);
                 publish_wheel_control_telemetry(0.0f, 0.0f, 0.0f, false);
                 return;
@@ -238,6 +243,7 @@ void master_scheduler_callback()
                 // 每次切换控制来源都清除角度环历史，避免视觉目标和固定 yaw 相互带入。
                 pid_angle.clear();
                 pid_angle.suppress_derivative_once();
+                last_vision_control_steer = 0.0f;
 
                 if (avoid.state == ObstacleAvoidState::Decelerate ||
                     avoid.state == ObstacleAvoidState::TurnToRelativeYaw ||
@@ -284,12 +290,25 @@ void master_scheduler_callback()
                 target_speed = base_speed;
                 target_yaw = local_vision_target_yaw;
                 // 正式模式按基础速度动态限制转向权限，避免低速/弯道时差速过度。
-                constexpr float k_max_steer_ratio = 0.60f;
+                constexpr float k_max_steer_ratio = 1.0f;
                 const float steer_limit = base_speed * k_max_steer_ratio;
-                control_steer = pid_angle.calc(local_vision_target_yaw,
-                                               yaw,
-                                               control_dt,
-                                               steer_limit);
+                const float requested_steer = pid_angle.calc(local_vision_target_yaw,
+                                                             yaw,
+                                                             control_dt,
+                                                             steer_limit);
+                // 大幅反向请求加速穿过零；小修正仍保持原速率，避免重新出现左右轮互相制动。
+                const bool confirmed_steer_reversal =
+                    requested_steer * last_vision_control_steer < 0.0f &&
+                    std::fabs(requested_steer) >= k_vision_steer_reversal_threshold;
+                const float steer_rate = confirmed_steer_reversal
+                                             ? k_vision_steer_reversal_rate_per_second
+                                             : k_vision_steer_normal_rate_per_second;
+                const float max_steer_step = steer_rate * control_dt;
+                control_steer = std::clamp(requested_steer,
+                                           last_vision_control_steer - max_steer_step,
+                                           last_vision_control_steer + max_steer_step);
+                control_steer = std::clamp(control_steer, -steer_limit, steer_limit);
+                last_vision_control_steer = control_steer;
                 // 比赛模式不允许内轮倒转；正 steer 表示左轮加速、右轮减速，车辆向右转。
                 target_speed_l = std::max(0.0f, base_speed + control_steer);
                 target_speed_r = std::max(0.0f, base_speed - control_steer);

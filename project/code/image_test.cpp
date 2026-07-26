@@ -1410,7 +1410,7 @@ void turn_to_bin(void)
     uint8 i, j;
 
     const int lower_threshold = Threshold;
-    const int upper_threshold = std::min(Threshold + 5, 255);
+    const int upper_threshold = std::min(Threshold + 10, 255);
     const uint8 split_row = MT9V03X_H / 2;
 
     for (i = 0; i < MT9V03X_H; i++)

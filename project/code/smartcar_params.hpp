@@ -10,12 +10,26 @@ namespace smartcar::params
 namespace speed
 {
 // 各赛道场景的默认目标轮速。运行时会复制到可由菜单修改的变量中。
-inline constexpr float straight_target = 130.0*1.2f;
-inline constexpr float gentle_curve_target = 110.0 * 1.2f;
-inline constexpr float sharp_curve_target = 100.0*1.2f;
-inline constexpr float obstacle_avoid_target = 70.0*1.2f;
-inline constexpr float circle_target = 125.0*1.2f;
-inline constexpr float lost_line_target = 110.0f * 1.2;
+// inline constexpr float straight_target = 130.0*1.2f;
+// inline constexpr float gentle_curve_target = 110.0 * 1.2f;
+// inline constexpr float sharp_curve_target = 100.0*1.2f;
+// inline constexpr float obstacle_avoid_target = 70.0*1.2f;
+// inline constexpr float circle_target = 125.0*1.2f;
+// inline constexpr float lost_line_target = 110.0f * 1.2;
+
+// inline constexpr float straight_target = 125.0 * 1.1f;
+// inline constexpr float gentle_curve_target = 110.0 * 1.1f;
+// inline constexpr float sharp_curve_target = 100.0 * 1.1f;
+// inline constexpr float obstacle_avoid_target = 70.0 * 1.1f;
+// inline constexpr float circle_target = 115.0 * 1.1f;
+// inline constexpr float lost_line_target = 110.0f * 1.1;
+
+inline constexpr float straight_target = 125.0f;
+inline constexpr float gentle_curve_target = 100.0f;
+inline constexpr float sharp_curve_target = 95.0f;
+inline constexpr float obstacle_avoid_target = 70.f;
+inline constexpr float circle_target = 100.0f;
+inline constexpr float lost_line_target = 110.0f ;
 // inline constexpr float straight_target = 130.0f;
 // inline constexpr float gentle_curve_target = 110.0 * 0.8f;
 // inline constexpr float sharp_curve_target = 100.0*0.8f;
@@ -157,14 +171,14 @@ struct PurePursuitSetting
 // inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};
 // inline constexpr PurePursuitSetting circle_inside_pursuit{44.0f, 34.0f};
 // inline constexpr PurePursuitSetting circle_exit_pursuit{44.0f, 30.0f};
-inline constexpr PurePursuitSetting straight_pursuit{55.2f, 35.0f};
-inline constexpr PurePursuitSetting gentle_curve_pursuit{48.0f, 40.0f};
-inline constexpr PurePursuitSetting sharp_curve_pursuit{45.0f, 45.0f};
+inline constexpr PurePursuitSetting straight_pursuit{60.2f, 35.0f};
+inline constexpr PurePursuitSetting gentle_curve_pursuit{52.0f, 40.0f};
+inline constexpr PurePursuitSetting sharp_curve_pursuit{50.0f, 45.0f};
 inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0f, 90.0f};
 inline constexpr PurePursuitSetting lost_line_pursuit{65.0f, 15.0f};
-inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};
-inline constexpr PurePursuitSetting circle_inside_pursuit{44.0f, 34.0f};
-inline constexpr PurePursuitSetting circle_exit_pursuit{44.0f, 30.0f};
+inline constexpr PurePursuitSetting circle_entry_pursuit{50.0f, 40.0f};
+inline constexpr PurePursuitSetting circle_inside_pursuit{50.0f, 34.0f};
+inline constexpr PurePursuitSetting circle_exit_pursuit{50.0f, 30.0f};
 
 static_assert(edge_resample_distance_px > 0.0f &&
               control_resample_distance_px > 0.0f,
