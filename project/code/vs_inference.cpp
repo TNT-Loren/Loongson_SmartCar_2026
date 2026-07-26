@@ -13,6 +13,47 @@ static_assert(VS_TRACK_EDGE_X_MIN >= 0 &&
                   VS_TRACK_EDGE_X_MAX < UVC_WIDTH,
               "VS track edge X limits must be within the camera frame");
 
+namespace
+{
+// 根据红色矩形的长轴方向和所在半区，返回需要顺时针旋转的角度。
+// 目标是让长轴朝向 ROI 下方：纵向长轴比较上/下，横向长轴比较左/右。
+// 只有四个离散结果，避免任意角度旋转带来的插值和仿射计算。
+constexpr int red_down_rotation_degrees(int red_x, int red_y,
+                                        int red_width, int red_height,
+                                        int width, int height)
+{
+    const int red_center_x2 = red_x * 2 + red_width;
+    const int red_center_y2 = red_y * 2 + red_height;
+
+    if (red_height >= red_width)
+    {
+        // 长轴已经纵向：红块在下方保持不变，在上方旋转180度。
+        return red_center_y2 >= height ? 0 : 180;
+    }
+
+    // 长轴为横向：右侧顺时针90度，左侧顺时针270度，使长轴朝向下方。
+    return red_center_x2 >= width ? 90 : 270;
+}
+
+static_assert(red_down_rotation_degrees(28, 44, 8, 16, 64, 64) == 0,
+              "bottom red block must not rotate");
+static_assert(red_down_rotation_degrees(44, 28, 16, 8, 64, 64) == 90,
+              "right red block must rotate clockwise");
+static_assert(red_down_rotation_degrees(28, 4, 8, 16, 64, 64) == 180,
+              "top red block must rotate 180 degrees");
+static_assert(red_down_rotation_degrees(4, 28, 16, 8, 64, 64) == 270,
+              "left red block must rotate counter-clockwise");
+
+int opencv_rotate_code(int degrees)
+{
+    if (degrees == 90)
+        return cv::ROTATE_90_CLOCKWISE;
+    if (degrees == 180)
+        return cv::ROTATE_180;
+    return cv::ROTATE_90_COUNTERCLOCKWISE; // 270°
+}
+} // namespace
+
 #if VS_AI_STREAM_FEATURE_ENABLE
 static_assert(VS_BOX_SIZE == 64,
               "VS AI stream protocol currently requires a 64x64 model ROI");
@@ -115,6 +156,13 @@ bool VSInference::init(const std::vector<std::string> &_labels,
                cfg.by_min, cfg.by_max);
         return false;
     }
+    if (cfg.confidence_weight_strength < 0.0f ||
+        cfg.confidence_weight_strength > 1.0f)
+    {
+        printf("VS confidence weight strength must be within [0,1], current=%.3f\r\n",
+               cfg.confidence_weight_strength);
+        return false;
+    }
 #if VS_ENABLE_RED_MASK_CLOSE
     if (cfg.red_close_kernel_size_px <= 0 || cfg.red_close_iterations <= 0)
     {
@@ -180,6 +228,7 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     // ---- 3. 预分配图像缓冲区（复用，避免每帧分配） ----
     src = cv::Mat(UVC_HEIGHT, UVC_WIDTH, CV_8UC3);
     roi = cv::Mat(cfg.box_size, cfg.box_size, CV_8UC3);
+    roi_resize_buffer = cv::Mat(cfg.box_size, cfg.box_size, CV_8UC3);
     tx_frame = cv::Mat(UVC_HEIGHT, UVC_WIDTH, CV_8UC3);
 
     // HSV 只处理 Y=0..color_detect_y_max，先裁剪再降采样以减少色域计算量。
@@ -268,6 +317,7 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
     cfg.min_track = VS_MIN_TRACK;
     cfg.result_cooldown_ms = VS_RESULT_COOLDOWN_MS;
     cfg.exp_alpha = VS_EXP_ALPHA;
+    cfg.confidence_weight_strength = VS_CONFIDENCE_WEIGHT_STRENGTH;
 
     // 标签顺序必须与模型输出顺序一致；mean/norm 必须与训练/导出预处理一致。
     static const std::vector<std::string> k_labels = {
@@ -382,6 +432,13 @@ void VSInference::update_track_edge_limits()
     fill_track_edge_gaps(track_right_limit, track_right_valid, detect_h);
 }
 
+bool VSInference::track_edge_pair_is_valid(int y) const
+{
+    const int row = std::clamp(y, 0, detect_h - 1);
+    return track_left_valid[row] && track_right_valid[row] &&
+           track_right_limit[row] > track_left_limit[row];
+}
+
 bool VSInference::cx_is_valid(int cx, int bottom_y, int mode) const
 {
     const int y = std::clamp(bottom_y, 0, detect_h - 1);
@@ -389,8 +446,7 @@ bool VSInference::cx_is_valid(int cx, int bottom_y, int mode) const
         return track_left_valid[y] && cx >= track_left_limit[y];
     if (mode == VS_CX_LIMIT_RIGHT_ONLY)
         return track_right_valid[y] && cx <= track_right_limit[y];
-    return track_left_valid[y] && track_right_valid[y] &&
-           track_right_limit[y] > track_left_limit[y] &&
+    return track_edge_pair_is_valid(y) &&
            cx >= track_left_limit[y] && cx <= track_right_limit[y];
 }
 
@@ -551,6 +607,7 @@ void VSInference::process_frame(cv::Mat &src)
     roi_valid = false;
     best_cx = -1;
     best_by = -1;
+    best_red_rect = cv::Rect();
 #if VS_ENABLE_TERMINAL_OUTPUT
     best_area = 0;
 #endif
@@ -570,6 +627,7 @@ void VSInference::process_frame(cv::Mat &src)
         // 按缩放网格边界映射，坐标单位始终是320x240原图像素。
         const int left = sx * UVC_WIDTH / hsv_w;
         const int right = (sx + sw) * UVC_WIDTH / hsv_w - 1;
+        const int top = sy * detect_h / hsv_h;
         const int cx = (left + right) / 2;
         const int by = (sy + sh) * detect_h / hsv_h - 1;
 
@@ -605,6 +663,7 @@ void VSInference::process_frame(cv::Mat &src)
             has_best = true;
             best_cx = cx;
             best_by = by;
+            best_red_rect = cv::Rect(left, top, right - left + 1, by - top + 1);
 #if VS_ENABLE_TERMINAL_OUTPUT
             best_area = area;
 #endif
@@ -615,16 +674,34 @@ void VSInference::process_frame(cv::Mat &src)
 
 #if VS_ENABLE_TERMINAL_OUTPUT
     if (has_best)
-        printf("[AREA] %d px^2 (320x240)\r\n", best_area);
+        printf("[AREA] %d px^2 center=(%d,%d) state=%d\r\n",
+               best_area, best_cx, best_by, static_cast<int>(state));
 #endif
 
-    // 提前结算后锁定本目标，直到检测区连续空闲若干帧再允许下一轮识别。
-    // 这样急救包上的红色区域不会被当成新色块继续推理或重复投票。
+    // 提前结算后只锁定刚识别的同一目标。新目标紧跟着进入时，
+    // 不能因为“画面仍有红块”而被 WAIT_CLEAR 整段吞掉。
     if (state == WAIT_CLEAR)
     {
         if (has_best)
         {
+            const int y_tolerance = std::max(4, cfg.hsv_scale * 2);
+            const bool same_target =
+                std::abs(best_cx - tracked_cx) <= cfg.box_size / 2 &&
+                best_by >= tracked_by - y_tolerance;
+            if (same_target)
+            {
+                lost_cnt = 0;
+                return;
+            }
+
+            // 新红块明显位于上一目标后方，当前帧立即建立新跟踪。
+            // 使用 TRACKING 的宽 Y 范围，避免新目标已稍越过 BY_MAX 时丢帧。
+            state = TRACKING;
             lost_cnt = 0;
+#if VS_ENABLE_TERMINAL_OUTPUT
+            printf("[REARM] new target center=(%d,%d), previous=(%d,%d)\r\n",
+                   best_cx, best_by, tracked_cx, tracked_by);
+#endif
         }
         else if (++lost_cnt >= cfg.lost_frames)
         {
@@ -634,7 +711,8 @@ void VSInference::process_frame(cv::Mat &src)
             printf("[REARM] red target cleared, ready for next target\r\n");
 #endif
         }
-        return;
+        if (!has_best)
+            return;
     }
 
     // ---- 跟踪状态机 ----
@@ -658,19 +736,63 @@ void VSInference::process_frame(cv::Mat &src)
         int xs = std::max(0, best_tl.x), xe = std::min(UVC_WIDTH - 1, best_br.x);
         int ys = std::max(0, best_tl.y), ye = std::min(UVC_HEIGHT - 1, best_br.y);
         const cv::Mat cropped_roi = src(cv::Rect(xs, ys, xe - xs + 1, ye - ys + 1));
-        if (cropped_roi.cols == cfg.box_size && cropped_roi.rows == cfg.box_size)
+
+        // 直接复用主检测已得到的红块最小外接矩形，不再执行一次 HSV。
+        // 矩形各边按实际裁剪尺寸映射到模型 ROI，避免只看中心点导致水平偏移误旋转。
+        const int red_roi_x = std::clamp(
+            (best_red_rect.x - xs) * cfg.box_size / cropped_roi.cols,
+            0, cfg.box_size - 1);
+        const int red_roi_y = std::clamp(
+            (best_red_rect.y - ys) * cfg.box_size / cropped_roi.rows,
+            0, cfg.box_size - 1);
+        const int red_roi_right = std::clamp(
+            (best_red_rect.x + best_red_rect.width - xs) * cfg.box_size /
+                cropped_roi.cols,
+            red_roi_x + 1, cfg.box_size);
+        const int red_roi_bottom = std::clamp(
+            (best_red_rect.y + best_red_rect.height - ys) * cfg.box_size /
+                cropped_roi.rows,
+            red_roi_y + 1, cfg.box_size);
+        const int rotation_degrees = red_down_rotation_degrees(
+            red_roi_x, red_roi_y,
+            red_roi_right - red_roi_x, red_roi_bottom - red_roi_y,
+            cfg.box_size, cfg.box_size);
+
+        const bool exact_size =
+            cropped_roi.cols == cfg.box_size && cropped_roi.rows == cfg.box_size;
+        if (exact_size && rotation_degrees == 0)
         {
             cropped_roi.copyTo(roi);
         }
-        else
+        else if (exact_size)
         {
-            // 靠近图像边界时原始框会被裁短。这里提前复用 Infer() 原有的线性缩放，
-            // 使模型和 AI 图传实际读取的始终是同一张固定尺寸 ROI。
+            // 直接从原图 ROI 旋转到模型输入，省掉一次 64x64x3 中间复制。
+            cv::rotate(cropped_roi, roi,
+                       opencv_rotate_code(rotation_degrees));
+        }
+        else if (rotation_degrees == 0)
+        {
             cv::resize(cropped_roi, roi,
                        cv::Size(cfg.box_size, cfg.box_size),
                        0, 0, cv::INTER_LINEAR);
         }
+        else
+        {
+            // 靠近图像边界时原始框会被裁短，先缩放到复用缓冲区再旋转。
+            cv::resize(cropped_roi, roi_resize_buffer,
+                       cv::Size(cfg.box_size, cfg.box_size),
+                       0, 0, cv::INTER_LINEAR);
+            cv::rotate(roi_resize_buffer, roi,
+                       opencv_rotate_code(rotation_degrees));
+        }
         roi_valid = !roi.empty();
+
+#if VS_ENABLE_TERMINAL_OUTPUT
+        printf("[ROTATE] red_rect=(%d,%d,%d,%d) clockwise=%d deg\r\n",
+               red_roi_x, red_roi_y,
+               red_roi_right - red_roi_x, red_roi_bottom - red_roi_y,
+               rotation_degrees);
+#endif
 
         // 每轮目标在第一次得到有效 ROI 时立即预警，不再等待顶部预警区命中。
         if (roi_valid && warning_armed)
@@ -723,7 +845,20 @@ void VSInference::process_frame(cv::Mat &src)
                 yo = 0;
             if (yo > lut_size)
                 yo = lut_size;
-            float w = weight_lut[yo];
+            const float y_weight = weight_lut[yo];
+            const float confidence = std::clamp(
+                net->GetLastConfidence(), 0.0f, 1.0f);
+            const float chance_confidence = labels.empty()
+                                                ? 0.0f
+                                                : 1.0f / static_cast<float>(labels.size());
+            float confidence_gain = 0.0f;
+            if (confidence > chance_confidence && chance_confidence < 1.0f)
+            {
+                confidence_gain = (confidence - chance_confidence) /
+                                  (1.0f - chance_confidence);
+            }
+            const float w = y_weight *
+                            (1.0f + cfg.confidence_weight_strength * confidence_gain);
 
             votes[r] += w;
             if (votes[r] > best_w)
@@ -735,12 +870,14 @@ void VSInference::process_frame(cv::Mat &src)
             if (state == LOST)
                 lost_cnt = 0;
             state = TRACKING;
+            tracked_cx = best_cx;
             tracked_by = obj_by;
             track_cnt++;
 
 #if VS_ENABLE_TERMINAL_OUTPUT
-            printf("[TRACK #%d] center=(%d,%d) w=%.2f -> %s | %s (%lld us)\r\n",
-                   track_cnt, best_cx, obj_by, w,
+            printf("[TRACK #%d] center=(%d,%d) rot=%ddeg y_w=%.2f conf=%.1f%% w=%.2f -> %s | %s (%lld us)\r\n",
+                   track_cnt, best_cx, obj_by, rotation_degrees, y_weight,
+                   confidence * 100.0f, w,
                    r.c_str(), classify_label(r).c_str(), us);
 #endif
 
@@ -1057,7 +1194,23 @@ void VSInference::draw_guidelines(cv::Mat &src)
     h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 提前结算线
     const int mode = cx_limit_mode.load(std::memory_order_relaxed);
     const int edge_rows = std::min(src.rows, detect_h);
-    if (mode != VS_CX_LIMIT_RIGHT_ONLY)
+    if (mode == VS_CX_LIMIT_BOTH)
+    {
+        for (int y = 1; y < edge_rows; ++y)
+        {
+            if (!track_edge_pair_is_valid(y - 1) || !track_edge_pair_is_valid(y))
+                continue;
+            bres_line(src,
+                      track_left_limit[y - 1], y - 1,
+                      track_left_limit[y], y,
+                      cv::Scalar(0, 255, 255));
+            bres_line(src,
+                      track_right_limit[y - 1], y - 1,
+                      track_right_limit[y], y,
+                      cv::Scalar(0, 255, 255));
+        }
+    }
+    else if (mode == VS_CX_LIMIT_LEFT_ONLY)
     {
         for (int y = 1; y < edge_rows; ++y)
         {
@@ -1069,7 +1222,7 @@ void VSInference::draw_guidelines(cv::Mat &src)
                       cv::Scalar(0, 255, 255));
         }
     }
-    if (mode != VS_CX_LIMIT_LEFT_ONLY)
+    else if (mode == VS_CX_LIMIT_RIGHT_ONLY)
     {
         for (int y = 1; y < edge_rows; ++y)
         {

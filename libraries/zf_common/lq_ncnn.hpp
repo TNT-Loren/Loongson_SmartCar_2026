@@ -80,6 +80,9 @@ public:
      */
     std::vector<float> GetLastScores() const;
 
+    // 获取最近一次推理最高类别的概率；兼容概率输出和原始 logits。
+    float GetLastConfidence() const;
+
     /*!
      * @brief   NCNN析构函数
      */
@@ -114,4 +117,5 @@ private:
 
     // 最近一次推理的原始logits缓存（用于调试输出）
     std::vector<float>       m_last_logits;
+    float                    m_last_confidence;
 };

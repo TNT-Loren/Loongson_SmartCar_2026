@@ -6,12 +6,18 @@
 #include <map>
 #include "zf_common_headfile.hpp"
 
+// 增加置信度的运用
+// 有时候边缘线容易甩飞
+// 色块检测有时候有bug，明明px输出为208、60却不生成ROI区域
+// 长期色块警告未消除的时候，重新取消标志位***********************
+
+
 // ===================================================================
 // VS 调参区：只改这里。坐标基于 320x240 彩色图。
 // ===================================================================
 // 开关：0=关闭，1=开启
 #define VS_ENABLE_TERMINAL_OUTPUT (0) // 终端打印详细识别日志
-#define VS_ENABLE_GUIDELINES (0)      // VS 彩色调试图中绘制辅助线
+#define VS_ENABLE_GUIDELINES (1)      // VS 彩色调试图中绘制辅助线
 
 // 色块检测：先 HSV 找红色目标，再用 box 框出模型输入 ROI。
 #define VS_COLOR_DETECT_Y_MAX (120) // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算
@@ -21,7 +27,7 @@
 #define VS_RED_CLOSE_ITERATIONS (1)  // 闭运算次数；过大会把原本独立的目标合并
 #define VS_BOX_SIZE (64)       // 绿色检测框大小；必须与 NCNN 输入尺寸一致
 #define VS_BOX_Y_OFFSET_PX (5) // 检测框Y偏移：正=下移，负=上移，单位px
-#define VS_AREA_MIN (24)       // 色块最小面积，单位为320x240原图px^2
+#define VS_AREA_MIN (16)       // 色块最小面积，单位为320x240原图px^2
 #define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
 
 // VS 左右边线 X 限制调参区：越界后强制锁定到对应边界。
@@ -52,6 +58,7 @@
 #define VS_MIN_TRACK (2)             // 至少跟踪多少帧才认为结果有效
 #define VS_RESULT_COOLDOWN_MS (2000) // 两次最终结果输出之间的冷却时间，单位ms
 #define VS_EXP_ALPHA (2.5f)          // Y方向指数权重；越大越偏向近处目标
+#define VS_CONFIDENCE_WEIGHT_STRENGTH (0.25f) // 满置信度相对Y权重最多增加25%
 
 // NCNN 模型与归一化：必须与训练/导出模型时保持一致。
 // 龙邱原模型训练结果
@@ -66,11 +73,17 @@
 // #define VS_NORM_MEAN               123.675f, 116.28f, 103.53f
 // #define VS_NORM_VAL                0.01712475f, 0.017507f, 0.01742919f
 
+// 激进模型2，速度未对比，测试的时候效果比第2次的好
+// #define VS_MODEL_PARAM_PATH "v3_tiny_classifier_fp32.ncnn.param"
+// #define VS_MODEL_BIN_PATH "v3_tiny_classifier_fp32.ncnn.bin"
+// #define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
+// #define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
+
 #define VS_MODEL_PARAM_PATH "tiny_classifier_fp32.ncnn.param"
-#define VS_MODEL_BIN_PATH "tiny_classifier_fp32.ncnn.bin"
+#define VS_MODEL_BIN_PATH   "tiny_classifier_fp32.ncnn.bin"
 
 #define VS_NORM_MEAN 151.682561f, 146.853219f, 149.692995f
-#define VS_NORM_VAL 0.028930550f, 0.021880207f, 0.032404602f
+#define VS_NORM_VAL  0.028930550f, 0.021880207f, 0.032404602f
 
 // ===================================================================
 // VSConfig：运行时配置镜像。默认值全部来自上方宏，通常只改“VS 调参区”。
@@ -99,6 +112,7 @@ struct VSConfig
     int min_track = VS_MIN_TRACK;
     int result_cooldown_ms = VS_RESULT_COOLDOWN_MS;
     float exp_alpha = VS_EXP_ALPHA;
+    float confidence_weight_strength = VS_CONFIDENCE_WEIGHT_STRENGTH;
 
     std::string model_param = VS_MODEL_PARAM_PATH;
     std::string model_bin = VS_MODEL_BIN_PATH;
@@ -186,7 +200,8 @@ private:
     // ===== 图像缓冲区（预分配复用，避免每帧 malloc/free） =====
     uint16_t *rgb_image = nullptr;  // 摄像头原始 RGB565 指针
     cv::Mat src;                    // BGR 工作图像 (UVC_WIDTH × UVC_HEIGHT × 3)
-    cv::Mat roi;                    // NCNN 推理 ROI  (box_size × box_size × 3)
+    cv::Mat roi;                    // 方向校正后的 NCNN 推理 ROI
+    cv::Mat roi_resize_buffer;      // 边缘 ROI 需要先缩放再旋转时复用
     cv::Mat src_small;              // HSV 降采样缓冲区（预分配复用）
     cv::Mat tx_frame;               // 图传输出工作缓冲，避免每帧 clone/zeros 反复分配
     cv::Mat red_debug_normal_mask;  // 调参视图中的有效检测掩码（按需分配）
@@ -214,6 +229,7 @@ private:
     bool roi_valid = false;
     int best_cx = -1;
     int best_by = -1;
+    cv::Rect best_red_rect;         // 所选红色连通域最小外接矩形（320x240坐标）
 #if VS_ENABLE_TERMINAL_OUTPUT
     int best_area = 0;
 #endif
@@ -264,6 +280,7 @@ private:
     void bgr_to_rgb565(cv::Mat &src);
     bool build_red_tuning_debug_image();
     void update_track_edge_limits();
+    bool track_edge_pair_is_valid(int y) const;
     bool cx_is_valid(int cx, int bottom_y, int mode) const;
 
     static std::string classify_label(const std::string &label);

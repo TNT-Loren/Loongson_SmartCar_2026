@@ -18,8 +18,7 @@ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 
 #include <limits>
 #include <stdexcept>
-
-#include <opencv2/imgproc.hpp>
+#include <cmath>
 
 /*LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL
  * @函数名称：LQ_NCNN::LQ_NCNN()
@@ -35,6 +34,7 @@ LQ_NCNN::LQ_NCNN()
     , m_input_height(96)
     , m_input_name("in0")
     , m_output_name("out0")
+    , m_last_confidence(0.0f)
 {
     // 默认使用ImageNet标准归一化
     m_mean_vals[0] = 123.675f;
@@ -93,23 +93,24 @@ std::string LQ_NCNN::Infer(const cv::Mat& bgr_image)
     if (bgr_image.empty()) {
         throw std::invalid_argument("Input image is empty.");
     }
+    if (bgr_image.type() != CV_8UC3) {
+        throw std::invalid_argument("Input image must be CV_8UC3 BGR.");
+    }
 
-    // 调整图像尺寸
-    cv::Mat resized;
-    cv::resize(bgr_image, resized, cv::Size(m_input_width, m_input_height));
-
-    // 转换色彩空间: BGR -> RGB
-    // 训练时使用RGB格式(OpenCV读取默认是BGR，需要转换)
-    cv::Mat rgb;
-    cv::cvtColor(resized, rgb, cv::COLOR_BGR2RGB);
-
-    // 转换为NCNN格式
-    ncnn::Mat input = ncnn::Mat::from_pixels(
-        rgb.data,
-        ncnn::Mat::PIXEL_RGB,
-        m_input_width,
-        m_input_height
-    );
+    // NCNN 直接读取 BGR 并输出 RGB 张量，避免 OpenCV resize/cvtColor
+    // 产生两张临时图。VS 输入已是 64x64，正常路径不再执行缩放。
+    ncnn::Mat input;
+    const int stride = static_cast<int>(bgr_image.step);
+    if (bgr_image.cols == m_input_width && bgr_image.rows == m_input_height) {
+        input = ncnn::Mat::from_pixels(
+            bgr_image.data, ncnn::Mat::PIXEL_BGR2RGB,
+            bgr_image.cols, bgr_image.rows, stride);
+    } else {
+        input = ncnn::Mat::from_pixels_resize(
+            bgr_image.data, ncnn::Mat::PIXEL_BGR2RGB,
+            bgr_image.cols, bgr_image.rows, stride,
+            m_input_width, m_input_height);
+    }
     input.substract_mean_normalize(m_mean_vals, m_norm_vals);
 
     // 创建提取器并推理
@@ -143,6 +144,31 @@ std::string LQ_NCNN::Infer(const cv::Mat& bgr_image)
     int class_id = Argmax(logits);
     if (class_id < 0) {
         throw std::runtime_error("Failed to get class id from output logits.");
+    }
+
+    // 有些模型最后一层已输出概率，有些模型输出 logits；两种情况统一得到概率置信度。
+    bool is_probability = true;
+    double probability_sum = 0.0;
+    for (int i = 0; i < logits.w; ++i) {
+        const float value = logits[i];
+        if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+            is_probability = false;
+            break;
+        }
+        probability_sum += value;
+    }
+
+    if (is_probability && std::fabs(probability_sum - 1.0) <= 0.01) {
+        m_last_confidence = logits[class_id];
+    } else {
+        const float max_logit = logits[class_id];
+        double exp_sum = 0.0;
+        for (int i = 0; i < logits.w; ++i) {
+            exp_sum += std::exp(static_cast<double>(logits[i] - max_logit));
+        }
+        m_last_confidence = exp_sum > 0.0
+                                ? static_cast<float>(1.0 / exp_sum)
+                                : 0.0f;
     }
 
     // 返回类别名称或编号
@@ -225,6 +251,11 @@ void LQ_NCNN::SetNormalize(const float mean_vals[3], const float norm_vals[3])
 std::vector<float> LQ_NCNN::GetLastScores() const
 {
     return m_last_logits;
+}
+
+float LQ_NCNN::GetLastConfidence() const
+{
+    return m_last_confidence;
 }
 
 /*LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL

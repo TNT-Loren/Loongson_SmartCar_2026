@@ -10,12 +10,12 @@ namespace smartcar::params
 namespace speed
 {
 // 各赛道场景的默认目标轮速。运行时会复制到可由菜单修改的变量中。
-// inline constexpr float straight_target = 130.0*1.2f;
-// inline constexpr float gentle_curve_target = 110.0 * 1.2f;
-// inline constexpr float sharp_curve_target = 100.0*1.2f;
-// inline constexpr float obstacle_avoid_target = 70.0*1.2f;
-// inline constexpr float circle_target = 125.0*1.2f;
-// inline constexpr float lost_line_target = 110.0f * 1.2;
+inline constexpr float straight_target = 130.0*1.25f;
+inline constexpr float gentle_curve_target = 110.0 * 1.25f;
+inline constexpr float sharp_curve_target = 100.0*1.25f;
+inline constexpr float obstacle_avoid_target = 70.0*1.25f;
+inline constexpr float circle_target = 125.0*1.25f;
+inline constexpr float lost_line_target = 110.0 * 1.25f;
 
 // inline constexpr float straight_target = 125.0 * 1.1f;
 // inline constexpr float gentle_curve_target = 110.0 * 1.1f;
@@ -24,12 +24,12 @@ namespace speed
 // inline constexpr float circle_target = 115.0 * 1.1f;
 // inline constexpr float lost_line_target = 110.0f * 1.1;
 
-inline constexpr float straight_target = 125.0f;
-inline constexpr float gentle_curve_target = 100.0f;
-inline constexpr float sharp_curve_target = 95.0f;
-inline constexpr float obstacle_avoid_target = 70.f;
-inline constexpr float circle_target = 100.0f;
-inline constexpr float lost_line_target = 110.0f ;
+// inline constexpr float straight_target = 125.0f;
+// inline constexpr float gentle_curve_target = 100.0f;
+// inline constexpr float sharp_curve_target = 95.0f;
+// inline constexpr float obstacle_avoid_target = 70.f;
+// inline constexpr float circle_target = 100.0f;
+// inline constexpr float lost_line_target = 110.0f ;
 // inline constexpr float straight_target = 130.0f;
 // inline constexpr float gentle_curve_target = 110.0 * 0.8f;
 // inline constexpr float sharp_curve_target = 100.0*0.8f;

@@ -12,14 +12,14 @@
 // AI ROI 图传模式：0=手动模式（每按一次 U 发送下一张有效 ROI）；
 //                   1=自动模式（按 U 启停，开启后连续发送 ROI）。
 #ifndef VS_AI_STREAM_MODE
-#define VS_AI_STREAM_MODE (0)
+#define VS_AI_STREAM_MODE (1)
 #endif
 
 #if VS_AI_STREAM_MODE != 0 && VS_AI_STREAM_MODE != 1
 #error "VS_AI_STREAM_MODE must be 0 (manual) or 1 (automatic)"
 #endif
 
-#define VS_AI_STREAM_SERVER_IP "192.168.31.10" // 默认上位机 IP
+#define VS_AI_STREAM_SERVER_IP "192.168.31.20" // 默认上位机 IP
 #define VS_AI_STREAM_IMAGE_PORT (8091)          // VSAI 图片端口
 #define VS_AI_STREAM_DEFAULT_ENABLED (VS_AI_STREAM_MODE) // 自动模式随程序启动，手动模式等待 U 键
 

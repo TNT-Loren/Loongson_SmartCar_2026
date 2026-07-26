@@ -55,6 +55,7 @@ ObstacleAvoidExitReason g_last_exit_reason = ObstacleAvoidExitReason::None;
 float g_turn_target_yaw = 0.0f;
 bool g_waiting_for_result = false;
 bool g_decelerate_brake_completed = false;
+bool g_result_priority_turn = false;
 std::uint32_t g_transition_sequence = 0;
 MonotonicEventTimer g_state_timer;
 MonotonicEventTimer g_total_timer;
@@ -95,6 +96,7 @@ void enter_cooldown(ObstacleAvoidExitReason reason,
     g_turn_target_yaw = 0.0f;
     g_waiting_for_result = false;
     g_decelerate_brake_completed = false;
+    g_result_priority_turn = false;
     g_total_timer.reset();
     enter_state(ObstacleAvoidState::Cooldown, now);
 }
@@ -108,6 +110,7 @@ void start_decelerate(ObstacleAvoidDirection direction,
     g_turn_target_yaw = 0.0f;
     g_waiting_for_result = waiting_for_result;
     g_decelerate_brake_completed = false;
+    g_result_priority_turn = false;
     g_total_timer.reset();
     enter_state(ObstacleAvoidState::Decelerate, now);
 }
@@ -193,15 +196,17 @@ bool obstacle_avoid_confirm(ObstacleAvoidDirection direction)
     std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
     if (g_state == ObstacleAvoidState::Decelerate && g_waiting_for_result)
     {
-        // 只锁存方向，yaw 必须等到制动完成、真正进入状态 2 时再锁存。
+        // 结果已确认：优先进入状态 2，由控制线程在下一拍用当前 yaw 锁存转向目标。
         g_direction = direction;
         g_waiting_for_result = false;
+        g_result_priority_turn = true;
         return true;
     }
     if (g_state == ObstacleAvoidState::Idle)
     {
         // 最终分类比预警更可靠；预警漏掉时仍保留原来的直接绕行能力。
         start_decelerate(direction, false, now);
+        g_result_priority_turn = true;
         return true;
     }
     if (g_state == ObstacleAvoidState::Cooldown &&
@@ -210,6 +215,7 @@ bool obstacle_avoid_confirm(ObstacleAvoidDirection direction)
         // 最终分类可能恰好在预警等待超时后的短暂冷却期到达。
         // 这不是重复绕行请求，而是同一目标的权威分类结果。
         start_decelerate(direction, false, now);
+        g_result_priority_turn = true;
         return true;
     }
     return false;
@@ -244,6 +250,14 @@ ObstacleAvoidControl obstacle_avoid_update(float current_yaw,
     switch (g_state)
     {
     case ObstacleAvoidState::Decelerate:
+        if (g_result_priority_turn && g_direction != ObstacleAvoidDirection::None)
+        {
+            // 方向已知时不再强制等待轮速接近零；状态 2 仍使用低速和定角控制进行滚动绕行。
+            g_result_priority_turn = false;
+            enter_turn_to_relative_yaw(current_yaw, now);
+            break;
+        }
+
         if (!g_decelerate_brake_completed &&
             left_speed <= k_avoid_decelerate_exit_speed &&
             right_speed <= k_avoid_decelerate_exit_speed)
