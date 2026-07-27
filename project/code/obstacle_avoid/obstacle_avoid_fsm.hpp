@@ -10,6 +10,14 @@ enum class ObstacleAvoidDirection : std::uint8_t
     Right = 2  // 使用右边线绕行，状态 2 的相对 yaw 为正。
 };
 
+// 状态二进入前的赛道弯向；Unknown 包括直道、圆环、丢线和方向不明确的场景。
+enum class ObstacleAvoidRoadDirection : std::uint8_t
+{
+    Unknown = 0,
+    Left = 1,
+    Right = 2
+};
+
 enum class ObstacleAvoidState : std::uint8_t
 {
     Idle = 0,
@@ -55,7 +63,9 @@ bool obstacle_avoid_cancel_warning();
 // 由 10 ms 控制周期调用，推进状态并返回当前状态需要的控制目标。
 ObstacleAvoidControl obstacle_avoid_update(float current_yaw,
                                            float left_speed,
-                                           float right_speed);
+                                           float right_speed,
+                                           ObstacleAvoidRoadDirection road_direction =
+                                               ObstacleAvoidRoadDirection::Unknown);
 
 ObstacleAvoidControl obstacle_avoid_snapshot();
 bool obstacle_avoid_active();

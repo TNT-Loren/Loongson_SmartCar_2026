@@ -26,6 +26,25 @@ constexpr float k_angle_tuning_target_limit_deg = 180.0f;
 constexpr float k_angle_tuning_steer_limit = 30.0f;
 constexpr float k_obstacle_decelerate_vision_brake_release_ratio = 0.4f;
 float last_vision_control_steer = 0.0f;
+
+ObstacleAvoidRoadDirection classify_obstacle_road_direction(const TrackInfo &track_info)
+{
+    // 只使用已有的弯道场景和带符号 pure-pursuit 误差；不新增视觉分类算法。
+    if (track_info.scene != TrackScene::GentleCurve &&
+        track_info.scene != TrackScene::SharpCurve)
+    {
+        return ObstacleAvoidRoadDirection::Unknown;
+    }
+    if (track_info.deviation < 0.0f)
+    {
+        return ObstacleAvoidRoadDirection::Left;
+    }
+    if (track_info.deviation > 0.0f)
+    {
+        return ObstacleAvoidRoadDirection::Right;
+    }
+    return ObstacleAvoidRoadDirection::Unknown;
+}
 //////////////////////////////////////////////////
 static_assert(!(k_speed_pid_tuning_mode && k_angle_pid_tuning_mode),
               "Only one PID tuning mode can be enabled");
@@ -236,7 +255,11 @@ void master_scheduler_callback()
                 local_track_info = g_track_info;
             }
 
-            const ObstacleAvoidControl avoid = obstacle_avoid_update(yaw, speed1, speed2);
+            const ObstacleAvoidControl avoid = obstacle_avoid_update(
+                yaw,
+                speed1,
+                speed2,
+                classify_obstacle_road_direction(local_track_info));
             static std::uint32_t last_avoid_transition_sequence = 0;
             if (avoid.transition_sequence != last_avoid_transition_sequence)
             {
@@ -251,7 +274,7 @@ void master_scheduler_callback()
                     avoid.state == ObstacleAvoidState::FollowEdge ||
                     avoid.state == ObstacleAvoidState::Cooldown)
                 {
-                    // 进入制动、-90 切到 +30、定角转向和恢复巡线时，均不保留上一段速度环输出。
+                    // 进入制动、低速保持、定角转向和恢复巡线时，均不保留上一段速度环输出。
                     pid_left.clear();
                     pid_right.clear();
                 }

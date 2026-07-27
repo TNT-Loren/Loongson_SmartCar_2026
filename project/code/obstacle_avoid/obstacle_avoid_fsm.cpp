@@ -11,9 +11,9 @@ namespace obstacle_param = smartcar::params::obstacle;
 namespace
 {
 // 本地别名只用于保持状态机语义清晰；唯一调参入口为 smartcar_params.hpp。
-// 状态 1A 使用反向速度目标快速制动；最终 PWM 仍受速度环的 +/-55% 上限保护。
+// 状态 1A 使用负速度目标快速制动；最终 PWM 仍受速度环的 +/-55% 上限保护。
 constexpr float k_avoid_decelerate_target_speed = obstacle_param::decelerate_target_speed;
-// 状态 1B 在等待 AI 最终分类时保持正向低速，避免 -90 目标让车辆继续倒车。
+// 状态 1B 在等待 AI 最终分类时保持正向低速，避免负制动目标让车辆继续倒车。
 constexpr float k_avoid_warning_hold_speed = obstacle_param::warning_hold_speed;
 // 左右轮的有符号速度都不超过该值时，锁存“制动完成”，不再回到 -90。
 constexpr float k_avoid_decelerate_exit_speed = obstacle_param::decelerate_exit_speed;
@@ -24,9 +24,9 @@ constexpr auto k_avoid_decelerate_timeout = obstacle_param::decelerate_timeout;
 
 // 状态 2 定角转向时的基础轮速；角度 PID 的 steer 在此基础上形成左右差速。
 constexpr float k_avoid_turn_target_speed = obstacle_param::turn_target_speed;
-// 状态 2 左绕相对角：进入状态 2 时，以当时 yaw 为零点锁存 -60 度目标。
+// 状态 2 左绕相对角：进入状态 2 时，以当时 yaw 为零点锁存负的小角度目标。
 constexpr float k_avoid_turn_relative_yaw_left = obstacle_param::left_turn_relative_yaw_deg;
-// 状态 2 右绕相对角：进入状态 2 时，以当时 yaw 为零点锁存 +60 度目标。
+// 状态 2 右绕相对角：进入状态 2 时，以当时 yaw 为零点锁存正的小角度目标。
 constexpr float k_avoid_turn_relative_yaw_right = obstacle_param::right_turn_relative_yaw_deg;
 // 状态 2 正常退出容差：最短 yaw 角差进入配置容差时进入状态 3。
 constexpr float k_avoid_turn_yaw_tolerance = obstacle_param::turn_yaw_tolerance_deg;
@@ -47,6 +47,10 @@ constexpr float k_obstacle_avoid_edge_lookahead_distance = obstacle_param::edge_
 // 状态 3 从指定可靠边向法线方向生成临时中线时使用的 IPM 像素偏移；
 // car_control.cpp 启用直接边线弧长预瞄时，最终 ALP 不使用这条偏移中线。
 constexpr float k_avoid_edge_midline_offset_px = obstacle_param::edge_midline_offset_px;
+
+// 同向弯道需要比直道多转，反向弯道需要少转；比例统一由 smartcar_params.hpp 调整。
+constexpr float k_same_direction_turn_scale = obstacle_param::same_direction_turn_scale;
+constexpr float k_opposite_direction_turn_scale = obstacle_param::opposite_direction_turn_scale;
 
 std::mutex g_obstacle_avoid_mutex;
 ObstacleAvoidState g_state = ObstacleAvoidState::Idle;
@@ -116,12 +120,33 @@ void start_decelerate(ObstacleAvoidDirection direction,
 }
 
 void enter_turn_to_relative_yaw(float current_yaw,
+                                ObstacleAvoidRoadDirection road_direction,
                                 MonotonicEventTimer::TimePoint now)
 {
-    const float relative_yaw =
+    float relative_yaw =
         g_direction == ObstacleAvoidDirection::Left
             ? k_avoid_turn_relative_yaw_left
             : k_avoid_turn_relative_yaw_right;
+
+    const bool road_turns_same_way =
+        (g_direction == ObstacleAvoidDirection::Left &&
+         road_direction == ObstacleAvoidRoadDirection::Left) ||
+        (g_direction == ObstacleAvoidDirection::Right &&
+         road_direction == ObstacleAvoidRoadDirection::Right);
+    const bool road_turns_opposite_way =
+        (g_direction == ObstacleAvoidDirection::Left &&
+         road_direction == ObstacleAvoidRoadDirection::Right) ||
+        (g_direction == ObstacleAvoidDirection::Right &&
+         road_direction == ObstacleAvoidRoadDirection::Left);
+    if (road_turns_same_way)
+    {
+        relative_yaw *= k_same_direction_turn_scale;
+    }
+    else if (road_turns_opposite_way)
+    {
+        relative_yaw *= k_opposite_direction_turn_scale;
+    }
+
     g_turn_target_yaw = wrap_to_180(current_yaw + relative_yaw);
     // 预警阶段有独立超时；正式绕行的 3 秒从此处重新起算。
     g_total_timer.start(now);
@@ -236,7 +261,8 @@ bool obstacle_avoid_cancel_warning()
 
 ObstacleAvoidControl obstacle_avoid_update(float current_yaw,
                                            float left_speed,
-                                           float right_speed)
+                                           float right_speed,
+                                           ObstacleAvoidRoadDirection road_direction)
 {
     const auto now = MonotonicEventTimer::Clock::now();
     std::lock_guard<std::mutex> lock(g_obstacle_avoid_mutex);
@@ -254,7 +280,8 @@ ObstacleAvoidControl obstacle_avoid_update(float current_yaw,
         {
             // 方向已知时不再强制等待轮速接近零；状态 2 仍使用低速和定角控制进行滚动绕行。
             g_result_priority_turn = false;
-            enter_turn_to_relative_yaw(current_yaw, now);
+            // 只在进入状态二这一拍锁存弯向，转向过程中不再被视觉场景变化改写。
+            enter_turn_to_relative_yaw(current_yaw, road_direction, now);
             break;
         }
 
@@ -266,7 +293,7 @@ ObstacleAvoidControl obstacle_avoid_update(float current_yaw,
             g_decelerate_brake_completed = true;
             if (g_direction == ObstacleAvoidDirection::None)
             {
-                // 状态号不变，但控制目标从 -90 跳到 +30；递增序号让调度器清除制动 PID 历史。
+                // 状态号不变，但控制目标从制动切到低速保持；递增序号让调度器清除速度 PID 历史。
                 ++g_transition_sequence;
             }
         }
@@ -274,7 +301,8 @@ ObstacleAvoidControl obstacle_avoid_update(float current_yaw,
         if (g_decelerate_brake_completed &&
             g_direction != ObstacleAvoidDirection::None)
         {
-            enter_turn_to_relative_yaw(current_yaw, now);
+            // 方向已知且制动完成时，同样只在这一拍锁存当前弯向。
+            enter_turn_to_relative_yaw(current_yaw, road_direction, now);
         }
         else if (g_waiting_for_result &&
                  g_state_timer.expired(k_avoid_warning_result_timeout, now))
