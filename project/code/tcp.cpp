@@ -8,7 +8,7 @@
 #define TCP_IMAGE_SOURCE_VS 1 // lgy
 
 // 图传矩阵选择：巡线使用 TRACK，队友推理使用 VS。
-#define TCP_IMAGE_SOURCE 1
+#define TCP_IMAGE_SOURCE 0
 
 #if TCP_IMAGE_SOURCE != TCP_IMAGE_SOURCE_TRACK && TCP_IMAGE_SOURCE != TCP_IMAGE_SOURCE_VS
 #error "TCP_IMAGE_SOURCE must select TRACK or VS"

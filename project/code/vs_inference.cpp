@@ -15,51 +15,14 @@ static_assert(VS_TRACK_EDGE_X_MIN >= 0 &&
 
 namespace
 {
-// 根据红色矩形的长边方向和所在半区，返回需要顺时针旋转的角度。
-// 横向红条只能位于上/下边，纵向红条只能位于左/右边。
-// 只有四个离散结果，避免任意角度旋转带来的插值和仿射计算。
-constexpr int red_down_rotation_degrees(int red_x, int red_y,
-                                        int red_width, int red_height,
-                                        int width, int height)
+// 找到 ROI 中最大的红色连通域，并用 minAreaRect 估计其长边方向。
+// 长边是无方向直线，角度归一化到 [-90, 90)，可直接用于仿射旋转。
+bool largest_red_component_angle(const cv::Mat &red_mask,
+                                 cv::Mat &labels, cv::Mat &stats,
+                                 cv::Mat &centroids, int min_area,
+                                 float min_aspect_ratio, float &angle,
+                                 cv::Rect &rect, float &aspect_ratio)
 {
-    const int red_center_x2 = red_x * 2 + red_width;
-    const int red_center_y2 = red_y * 2 + red_height;
-
-    if (red_width > red_height)
-    {
-        // 横向长边：已经位于下方时保持不变，位于上方时旋转180度。
-        return red_center_y2 >= height ? 0 : 180;
-    }
-    if (red_height > red_width)
-    {
-        // 纵向长边：右侧顺时针90度，左侧逆时针90度。
-        return red_center_x2 >= width ? 90 : 270;
-    }
-
-    // 接近正方形时长边方向不可靠，使用离 ROI 中心更远的轴判断所在边。
-    const int dx2 = red_center_x2 - width;
-    const int dy2 = red_center_y2 - height;
-    const int abs_dx2 = dx2 >= 0 ? dx2 : -dx2;
-    const int abs_dy2 = dy2 >= 0 ? dy2 : -dy2;
-    if (abs_dy2 >= abs_dx2)
-        return dy2 >= 0 ? 0 : 180;
-    return dx2 >= 0 ? 90 : 270;
-}
-
-static_assert(red_down_rotation_degrees(12, 48, 40, 8, 64, 64) == 0,
-              "bottom red block must not rotate");
-static_assert(red_down_rotation_degrees(48, 12, 8, 40, 64, 64) == 90,
-              "right red block must rotate clockwise");
-static_assert(red_down_rotation_degrees(12, 8, 40, 8, 64, 64) == 180,
-              "top red block must rotate 180 degrees");
-static_assert(red_down_rotation_degrees(8, 12, 8, 40, 64, 64) == 270,
-              "left red block must rotate counter-clockwise");
-
-bool largest_red_component_rect(const cv::Mat &red_mask,
-                                cv::Mat &labels, cv::Mat &stats,
-                                cv::Mat &centroids, cv::Rect &rect)
-{
-    constexpr int kMinDirectionArea = 4;
     const int component_count = cv::connectedComponentsWithStats(
         red_mask, labels, stats, centroids, 8, CV_32S);
 
@@ -75,9 +38,11 @@ bool largest_red_component_rect(const cv::Mat &red_mask,
         }
     }
 
-    if (largest_label < 0 || largest_area < kMinDirectionArea)
+    if (largest_label < 0 || largest_area < min_area)
     {
         rect = cv::Rect();
+        angle = 0.0f;
+        aspect_ratio = 0.0f;
         return false;
     }
 
@@ -86,16 +51,50 @@ bool largest_red_component_rect(const cv::Mat &red_mask,
         stats.at<int>(largest_label, cv::CC_STAT_TOP),
         stats.at<int>(largest_label, cv::CC_STAT_WIDTH),
         stats.at<int>(largest_label, cv::CC_STAT_HEIGHT));
-    return true;
-}
 
-int opencv_rotate_code(int degrees)
-{
-    if (degrees == 90)
-        return cv::ROTATE_90_CLOCKWISE;
-    if (degrees == 180)
-        return cv::ROTATE_180;
-    return cv::ROTATE_90_COUNTERCLOCKWISE; // 270°
+    std::vector<cv::Point> points;
+    points.reserve(static_cast<size_t>(largest_area));
+    for (int y = rect.y; y < rect.y + rect.height; ++y)
+    {
+        const int *label_row = labels.ptr<int>(y);
+        for (int x = rect.x; x < rect.x + rect.width; ++x)
+        {
+            if (label_row[x] == largest_label)
+                points.emplace_back(x, y);
+        }
+    }
+    if (points.size() < 2)
+    {
+        angle = 0.0f;
+        aspect_ratio = 0.0f;
+        return false;
+    }
+
+    const cv::RotatedRect rotated = cv::minAreaRect(points);
+    const float short_edge = std::min(rotated.size.width, rotated.size.height);
+    const float long_edge = std::max(rotated.size.width, rotated.size.height);
+    if (short_edge <= 1.0e-3f)
+    {
+        angle = 0.0f;
+        aspect_ratio = 0.0f;
+        return false;
+    }
+    aspect_ratio = long_edge / short_edge;
+    if (aspect_ratio < min_aspect_ratio)
+    {
+        angle = 0.0f;
+        return false;
+    }
+
+    // raw angle 不保证对应长边，先补 90 度，再按 180 度周期归一化。
+    angle = rotated.angle;
+    if (rotated.size.width < rotated.size.height)
+        angle += 90.0f;
+    angle = std::fmod(angle + 90.0f, 180.0f);
+    if (angle < 0.0f)
+        angle += 180.0f;
+    angle -= 90.0f;
+    return true;
 }
 } // namespace
 
@@ -354,6 +353,8 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
     cfg.box_y_offset = VS_BOX_Y_OFFSET_PX;
     cfg.area_min = VS_AREA_MIN;
     cfg.area_max = VS_AREA_MAX;
+    cfg.direction_min_area = VS_DIRECTION_MIN_AREA;
+    cfg.direction_min_aspect_ratio = VS_DIRECTION_MIN_ASPECT_RATIO;
     cfg.hsv_scale = VS_HSV_SCALE;
     cfg.by_min = VS_BY_MIN;
     cfg.by_max = VS_BY_MAX;
@@ -793,7 +794,7 @@ void VSInference::process_frame(cv::Mat &src)
         }
 
         // 在完整模型 ROI 上重新执行 HSV 双区间过滤，不使用主检测阶段的降采样矩形。
-        // 最大红色连通域可排除 ROI 内零散红色噪点；方向无效时默认不旋转。
+        // 最大红色连通域通过 minAreaRect 估计长边方向；方向不可靠时原图直通。
         cv::cvtColor(roi_resize_buffer, roi_direction_hsv, cv::COLOR_BGR2HSV);
         cv::inRange(roi_direction_hsv, cfg.hsv1_low, cfg.hsv1_high,
                     roi_direction_mask1);
@@ -803,36 +804,37 @@ void VSInference::process_frame(cv::Mat &src)
                        roi_direction_mask);
 
         cv::Rect direction_red_rect;
-        const bool direction_valid = largest_red_component_rect(
+        float rotation_angle = 0.0f;
+        float direction_aspect_ratio = 0.0f;
+        const bool direction_valid = largest_red_component_angle(
             roi_direction_mask, roi_direction_labels, roi_direction_stats,
-            roi_direction_centroids, direction_red_rect);
-        const int rotation_degrees = direction_valid
-                                         ? red_down_rotation_degrees(
-                                               direction_red_rect.x,
-                                               direction_red_rect.y,
-                                               direction_red_rect.width,
-                                               direction_red_rect.height,
-                                               cfg.box_size, cfg.box_size)
-                                         : 0;
+            roi_direction_centroids, cfg.direction_min_area,
+            cfg.direction_min_aspect_ratio, rotation_angle,
+            direction_red_rect, direction_aspect_ratio);
 
-        if (rotation_degrees == 0)
+        if (!direction_valid || std::fabs(rotation_angle) < 0.1f)
         {
             roi_resize_buffer.copyTo(roi);
         }
         else
         {
-            cv::rotate(roi_resize_buffer, roi,
-                       opencv_rotate_code(rotation_degrees));
+            const cv::Point2f center((roi_resize_buffer.cols - 1) * 0.5f,
+                                     (roi_resize_buffer.rows - 1) * 0.5f);
+            const cv::Mat rotation = cv::getRotationMatrix2D(
+                center, rotation_angle, 1.0);
+            cv::warpAffine(roi_resize_buffer, roi, rotation,
+                           roi_resize_buffer.size(), cv::INTER_LINEAR,
+                           cv::BORDER_REPLICATE);
         }
         roi_valid = !roi.empty();
 
 #if VS_ENABLE_TERMINAL_OUTPUT
         if (direction_valid)
         {
-            printf("[ROTATE] roi_hsv_rect=(%d,%d,%d,%d) clockwise=%d deg\r\n",
+            printf("[ROTATE] roi_hsv_rect=(%d,%d,%d,%d) angle=%.2f deg aspect=%.2f\r\n",
                    direction_red_rect.x, direction_red_rect.y,
                    direction_red_rect.width, direction_red_rect.height,
-                   rotation_degrees);
+                   rotation_angle, direction_aspect_ratio);
         }
         else
         {
@@ -921,8 +923,8 @@ void VSInference::process_frame(cv::Mat &src)
             track_cnt++;
 
 #if VS_ENABLE_TERMINAL_OUTPUT
-            printf("[TRACK #%d] center=(%d,%d) rot=%ddeg y_w=%.2f conf=%.1f%% w=%.2f -> %s | %s (%lld us)\r\n",
-                   track_cnt, best_cx, obj_by, rotation_degrees, y_weight,
+            printf("[TRACK #%d] center=(%d,%d) rot=%.2fdeg y_w=%.2f conf=%.1f%% w=%.2f -> %s | %s (%lld us)\r\n",
+                   track_cnt, best_cx, obj_by, rotation_angle, y_weight,
                    confidence * 100.0f, w,
                    r.c_str(), classify_label(r).c_str(), us);
 #endif

@@ -4,32 +4,32 @@
 #include <cstdint>
 
 // 智能车可标定参数的唯一默认值入口；修改后需重新编译。
-// 保持分组顺序：speed -> obstacle -> vision。
+// 保持分组顺序：speed -> control -> obstacle -> vision。
 namespace smartcar::params
 {
 namespace speed
 {
 // 各赛道场景的默认目标轮速。运行时会复制到可由菜单修改的变量中。
-inline constexpr float straight_target = 130.0*1.25f;
-inline constexpr float gentle_curve_target = 110.0 * 1.25f;
-inline constexpr float sharp_curve_target = 100.0*1.25f;
-inline constexpr float obstacle_avoid_target = 70.0*1.25f;
-inline constexpr float circle_target = 125.0*1.25f;
-inline constexpr float lost_line_target = 110.0 * 1.25f;
+// inline constexpr float straight_target = 130.0*1.25f;
+// inline constexpr float gentle_curve_target = 110.0 * 1.25f;
+// inline constexpr float sharp_curve_target = 100.0*1.25f;
+// inline constexpr float obstacle_avoid_target = 70.0*1.25f;
+// inline constexpr float circle_target = 125.0*1.25f;
+// inline constexpr float lost_line_target = 110.0 * 1.25f;
 
 // inline constexpr float straight_target = 125.0 * 1.1f;
 // inline constexpr float gentle_curve_target = 110.0 * 1.1f;
 // inline constexpr float sharp_curve_target = 100.0 * 1.1f;
 // inline constexpr float obstacle_avoid_target = 70.0 * 1.1f;
-// inline constexpr float circle_target = 115.0 * 1.1f;
+// inline constexpr float circle_target = 105.0 * 1.1f;
 // inline constexpr float lost_line_target = 110.0f * 1.1;
 
-// inline constexpr float straight_target = 125.0f;
-// inline constexpr float gentle_curve_target = 100.0f;
-// inline constexpr float sharp_curve_target = 95.0f;
-// inline constexpr float obstacle_avoid_target = 70.f;
-// inline constexpr float circle_target = 100.0f;
-// inline constexpr float lost_line_target = 110.0f ;
+inline constexpr float straight_target = 115.0f;
+inline constexpr float gentle_curve_target = 100.0f;
+inline constexpr float sharp_curve_target = 95.0f;
+inline constexpr float obstacle_avoid_target = 70.f;
+inline constexpr float circle_target = 100.0f;
+inline constexpr float lost_line_target = 110.0f ;
 // inline constexpr float straight_target = 130.0f;
 // inline constexpr float gentle_curve_target = 110.0 * 0.8f;
 // inline constexpr float sharp_curve_target = 100.0*0.8f;
@@ -48,6 +48,21 @@ static_assert(straight_target >= 0.0f && gentle_curve_target >= 0.0f &&
               "Speed targets must be non-negative");
 static_assert(acceleration_step > 0.0f && deceleration_step > 0.0f,
               "Speed smoothing steps must be positive");
+}
+
+namespace control
+{
+// 普通视觉修正与大幅反向换向的 steer 最大变化率，单位：steer/s。
+inline constexpr float k_vision_steer_normal_rate_per_second = 2000.0f;
+inline constexpr float k_vision_steer_reversal_rate_per_second = 3000.0f;
+// 反向请求幅度达到该值后，才使用更快的换向变化率。
+inline constexpr float k_vision_steer_reversal_threshold = 30.0f;
+
+static_assert(k_vision_steer_normal_rate_per_second > 0.0f &&
+              k_vision_steer_reversal_rate_per_second > 0.0f,
+              "Vision steer rate limits must be positive");
+static_assert(k_vision_steer_reversal_threshold >= 0.0f,
+              "Vision steer reversal threshold must be non-negative");
 }
 
 namespace obstacle
@@ -74,7 +89,7 @@ inline constexpr bool use_edge_forward_preview = true;
 inline constexpr float edge_lookahead_distance_px = 13.0f;
 inline constexpr float edge_midline_offset_px = -5.0f;
 inline constexpr auto edge_follow_duration = std::chrono::milliseconds{1000};
-inline constexpr auto reentry_cooldown = std::chrono::milliseconds{500};
+inline constexpr auto reentry_cooldown = std::chrono::milliseconds{500}; // 绕行结束后再次接受请求前的冷却时间。
 inline constexpr auto total_timeout = std::chrono::milliseconds{3000};
 
 static_assert(decelerate_exit_speed >= 0.0f,
@@ -177,8 +192,8 @@ inline constexpr PurePursuitSetting sharp_curve_pursuit{50.0f, 45.0f};
 inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0f, 90.0f};
 inline constexpr PurePursuitSetting lost_line_pursuit{65.0f, 15.0f};
 inline constexpr PurePursuitSetting circle_entry_pursuit{50.0f, 40.0f};
-inline constexpr PurePursuitSetting circle_inside_pursuit{50.0f, 34.0f};
-inline constexpr PurePursuitSetting circle_exit_pursuit{50.0f, 30.0f};
+inline constexpr PurePursuitSetting circle_inside_pursuit{45.0f, 34.0f};
+inline constexpr PurePursuitSetting circle_exit_pursuit{45.0f, 30.0f};
 
 static_assert(edge_resample_distance_px > 0.0f &&
               control_resample_distance_px > 0.0f,

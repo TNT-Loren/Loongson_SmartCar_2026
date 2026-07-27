@@ -2,6 +2,7 @@
 #include "beep.hpp"
 #include "common_MYmenu.hpp"
 #include "obstacle_avoid/obstacle_avoid_fsm.hpp"
+#include "smartcar_params.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <algorithm> // 必须包含这个才能用 std::clamp
 
 extern TrackInfo g_track_info;
+namespace control_param = smartcar::params::control;
 // false ture
 namespace
 {
@@ -22,9 +24,7 @@ constexpr float k_speed_tuning_target_max = 250.0f;
 constexpr float k_speed_tuning_gain_max = 20.0f;
 constexpr float k_angle_tuning_target_limit_deg = 180.0f;
 constexpr float k_angle_tuning_steer_limit = 30.0f;
-constexpr float k_vision_steer_normal_rate_per_second = 2000.0f;
-constexpr float k_vision_steer_reversal_rate_per_second = 3500.0f;
-constexpr float k_vision_steer_reversal_threshold = 30.0f;
+constexpr float k_obstacle_decelerate_vision_brake_release_ratio = 0.4f;
 float last_vision_control_steer = 0.0f;
 //////////////////////////////////////////////////
 static_assert(!(k_speed_pid_tuning_mode && k_angle_pid_tuning_mode),
@@ -181,6 +181,7 @@ void master_scheduler_callback()
         float target_speed_r = 0.0f;
         float control_steer = 0.0f;
         bool obstacle_entry_active = false;
+        bool obstacle_visual_braking = false;
         if constexpr (k_speed_pid_tuning_mode)
         {
             // 速度环调参：绕过视觉和角度环，两轮使用相同目标；滑块0/1/2=速度/Kp/Ki。
@@ -262,12 +263,24 @@ void master_scheduler_callback()
 
             if (avoid.state == ObstacleAvoidState::Decelerate)
             {
-                // 状态 1 始终直行：先用 -90 制动，达到阈值后由 FSM 切换为 +30 等待分类。
                 target_speed = avoid.target_speed;
-                target_yaw = yaw;
+                target_yaw = avoid.target_speed < 0.0f ? local_vision_target_yaw : yaw;
                 target_speed_l = avoid.target_speed;
                 target_speed_r = avoid.target_speed;
                 base_start_speed = avoid.target_speed;
+
+                if (avoid.target_speed < 0.0f)
+                {
+                    // 快速制动时两侧速度环通常同时负饱和，因此只靠目标轮速差无法产生视觉转向。
+                    // 这里先算视觉方向，随后在 PWM 端只松开外侧部分制动力，不增加正向驱动力。
+                    const float brake_release_limit =
+                        k_speed_pwm_limit_percent * k_obstacle_decelerate_vision_brake_release_ratio;
+                    control_steer = pid_angle.calc(local_vision_target_yaw,
+                                                   yaw,
+                                                   control_dt,
+                                                   brake_release_limit);
+                    obstacle_visual_braking = true;
+                }
             }
             else if (avoid.state == ObstacleAvoidState::TurnToRelativeYaw)
             {
@@ -299,10 +312,10 @@ void master_scheduler_callback()
                 // 大幅反向请求加速穿过零；小修正仍保持原速率，避免重新出现左右轮互相制动。
                 const bool confirmed_steer_reversal =
                     requested_steer * last_vision_control_steer < 0.0f &&
-                    std::fabs(requested_steer) >= k_vision_steer_reversal_threshold;
+                    std::fabs(requested_steer) >= control_param::k_vision_steer_reversal_threshold;
                 const float steer_rate = confirmed_steer_reversal
-                                             ? k_vision_steer_reversal_rate_per_second
-                                             : k_vision_steer_normal_rate_per_second;
+                                             ? control_param::k_vision_steer_reversal_rate_per_second
+                                             : control_param::k_vision_steer_normal_rate_per_second;
                 const float max_steer_step = steer_rate * control_dt;
                 control_steer = std::clamp(requested_steer,
                                            last_vision_control_steer - max_steer_step,
@@ -318,6 +331,18 @@ void master_scheduler_callback()
         // 左右速度内环把轮速误差转换为 PWM 百分比，最终限幅与 PID 内部限幅使用同一常量。
         pwm_l = pid_left.calc(target_speed_l, speed1, control_dt);
         pwm_r = pid_right.calc(target_speed_r, speed2, control_dt);
+        if (obstacle_visual_braking)
+        {
+            // 正 steer 需要右转：保持右轮制动，只松左轮；负 steer 时左右对称。
+            if (control_steer > 0.0f)
+            {
+                pwm_l = std::min(0.0f, pwm_l + control_steer);
+            }
+            else if (control_steer < 0.0f)
+            {
+                pwm_r = std::min(0.0f, pwm_r - control_steer);
+            }
+        }
         pwm_l = std::clamp(pwm_l, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         pwm_r = std::clamp(pwm_r, -k_speed_pwm_limit_percent, k_speed_pwm_limit_percent);
         motor_set_speed((int)pwm_l, (int)pwm_r);

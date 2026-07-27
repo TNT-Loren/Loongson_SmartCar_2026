@@ -17,7 +17,7 @@
 // ===================================================================
 // 开关：0=关闭，1=开启
 #define VS_ENABLE_TERMINAL_OUTPUT (0) // 终端打印详细识别日志
-#define VS_ENABLE_GUIDELINES (1)      // VS 彩色调试图中绘制辅助线
+#define VS_ENABLE_GUIDELINES (0)      // VS 彩色调试图中绘制辅助线
 
 // 色块检测：先 HSV 找红色目标，再用 box 框出模型输入 ROI。
 #define VS_COLOR_DETECT_Y_MAX (120) // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算
@@ -29,10 +29,12 @@
 #define VS_BOX_Y_OFFSET_PX (5) // 检测框Y偏移：正=下移，负=上移，单位px
 #define VS_AREA_MIN (16)       // 色块最小面积，单位为320x240原图px^2
 #define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
+#define VS_DIRECTION_MIN_AREA (4) // ROI方向检测的最小红色像素面积
+#define VS_DIRECTION_MIN_ASPECT_RATIO (1.10f) // 长宽比过小时不旋转
 
 // VS 左右边线 X 限制调参区：越界后强制锁定到对应边界。
-#define VS_TRACK_EDGE_X_MIN (10)
-#define VS_TRACK_EDGE_X_MAX (310)
+#define VS_TRACK_EDGE_X_MIN (20)
+#define VS_TRACK_EDGE_X_MAX (300)
 
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
 #define VS_CX_LIMIT_BOTH (0)       // 同时启用巡线左右边线限制
@@ -56,7 +58,7 @@
 // 跟踪与输出：目标触及提前结算线或离开有效区后，输出一次累计投票结果。
 #define VS_LOST_FRAMES (2)           // 连续丢失多少帧后确认目标离开
 #define VS_MIN_TRACK (2)             // 至少跟踪多少帧才认为结果有效
-#define VS_RESULT_COOLDOWN_MS (2000) // 两次最终结果输出之间的冷却时间，单位ms
+#define VS_RESULT_COOLDOWN_MS (500) // 两次最终结果输出之间的冷却时间，单位ms
 #define VS_EXP_ALPHA (2.5f)          // Y方向指数权重；越大越偏向近处目标
 #define VS_CONFIDENCE_WEIGHT_STRENGTH (0.25f) // 满置信度相对Y权重最多增加25%
 
@@ -79,11 +81,16 @@
 // #define VS_NORM_MEAN 151.602920f, 144.057952f, 147.296495f
 // #define VS_NORM_VAL 0.025728557f, 0.019134327f, 0.027740937f
 
-#define VS_MODEL_PARAM_PATH "tiny_classifier_fp32.ncnn.param"
-#define VS_MODEL_BIN_PATH   "tiny_classifier_fp32.ncnn.bin"
+// #define VS_MODEL_PARAM_PATH "tiny_classifier_fp32.ncnn.param"
+// #define VS_MODEL_BIN_PATH   "tiny_classifier_fp32.ncnn.bin"
 
-#define VS_NORM_MEAN 151.682561f, 146.853219f, 149.692995f
-#define VS_NORM_VAL  0.028930550f, 0.021880207f, 0.032404602f
+// #define VS_NORM_MEAN 151.682561f, 146.853219f, 149.692995f
+// #define VS_NORM_VAL  0.028930550f, 0.021880207f, 0.032404602f
+
+#define VS_MODEL_PARAM_PATH "tiny1_classifier_fp32.ncnn.param"
+#define VS_MODEL_BIN_PATH   "tiny1_classifier_fp32.ncnn.bin"
+#define VS_NORM_MEAN 152.259546f, 147.540231f, 149.967560f
+#define VS_NORM_VAL  0.031117584f, 0.023103096f, 0.034832886f
 
 // ===================================================================
 // VSConfig：运行时配置镜像。默认值全部来自上方宏，通常只改“VS 调参区”。
@@ -98,6 +105,8 @@ struct VSConfig
     int box_y_offset = VS_BOX_Y_OFFSET_PX;
     int area_min = VS_AREA_MIN;
     int area_max = VS_AREA_MAX;
+    int direction_min_area = VS_DIRECTION_MIN_AREA;
+    float direction_min_aspect_ratio = VS_DIRECTION_MIN_ASPECT_RATIO;
 
     int by_min = VS_BY_MIN;
     int by_max = VS_BY_MAX;
@@ -201,7 +210,14 @@ private:
     uint16_t *rgb_image = nullptr;  // 摄像头原始 RGB565 指针
     cv::Mat src;                    // BGR 工作图像 (UVC_WIDTH × UVC_HEIGHT × 3)
     cv::Mat roi;                    // 方向校正后的 NCNN 推理 ROI
-    cv::Mat roi_resize_buffer;      // 边缘 ROI 需要先缩放再旋转时复用
+    cv::Mat roi_resize_buffer;      // 未旋转的完整模型 ROI
+    cv::Mat roi_direction_hsv;      // ROI 全分辨率 HSV 方向检测缓冲区
+    cv::Mat roi_direction_mask1;
+    cv::Mat roi_direction_mask2;
+    cv::Mat roi_direction_mask;
+    cv::Mat roi_direction_labels;
+    cv::Mat roi_direction_stats;
+    cv::Mat roi_direction_centroids;
     cv::Mat src_small;              // HSV 降采样缓冲区（预分配复用）
     cv::Mat tx_frame;               // 图传输出工作缓冲，避免每帧 clone/zeros 反复分配
     cv::Mat red_debug_normal_mask;  // 调参视图中的有效检测掩码（按需分配）
@@ -229,7 +245,6 @@ private:
     bool roi_valid = false;
     int best_cx = -1;
     int best_by = -1;
-    cv::Rect best_red_rect;         // 所选红色连通域最小外接矩形（320x240坐标）
 #if VS_ENABLE_TERMINAL_OUTPUT
     int best_area = 0;
 #endif
