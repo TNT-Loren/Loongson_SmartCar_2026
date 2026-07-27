@@ -4,6 +4,7 @@
 #include "event_timer.hpp"
 #include "scheduler.hpp"
 #include "smartcar_params.hpp"
+#include "stop.hpp"
 #include "zgc_draw_tool.hpp"
 
 #include <algorithm>
@@ -4860,6 +4861,8 @@ void Image_Process(void)
 //        get_left_cusp_point();
         get_lost_line();						//找左右丢线行数
         update_ipm_auto_reliable_edge_selection();
+        // 原始边线完成后统计跳变；stop.cpp 内部负责启动延时、连续帧确认和冷却。
+        zebra_update_frame(true);
 //        Zebra_Stripes_Detect(100,50);
 
 //        if(Image_Flag.Zerba == 1&& complete == 0)
@@ -4913,6 +4916,8 @@ void Image_Process(void)
     }
     else
     {
+        // 起点搜索失败时明确清除本帧斑马线电平，避免沿用上一帧结果。
+        zebra_update_frame(false);
         clear_cross_fill_hold();
     }
 //		Left_Add_Line(1,MT9V03X_H-5,MT9V03X_W-1,0);

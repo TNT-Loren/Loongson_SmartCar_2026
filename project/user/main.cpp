@@ -2,6 +2,7 @@
 #include "main.hpp"
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
+#include "../code/stop.hpp"
 
 // 5.2 0.12 angle
 //  提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
@@ -141,9 +142,18 @@ int main(int, char **)
         if (image_test())
         {
             update_control_target();
+            if (zebra_consume_event())
+            {
+                // -1=关闭；改为 zebra_stop(2) 即第二条确认斑马线时停车。
+                if (zebra_stop(1))
+                {
+                    printf("zebra #%u -> vehicle stop\r\n", zebra_stop_count());
+                }
+            }
         }
         else
         {
+            zebra_update_frame(false);
             publish_lost_line_result();
         }
          fps_timer_end();
@@ -163,13 +173,27 @@ int main(int, char **)
              // 预警必须先于最终分类处理：先建立状态 1，同帧到达的最终结果再确认左右方向。
              if (g_vs.consume_red_warning())
              {
-                 printf("red warning -> decelerate %s\r\n",
-                        obstacle_avoid_warning_request() ? "accepted" : "ignored");
+                 // -1=关闭；改为 red_stop(N) 即第 N 个色块预警时停车。
+                 if (red_stop(6))
+                 {
+                     // 本次预警只触发锁停，不再启动绕行状态一。
+                     printf("red warning #%u -> vehicle stop\r\n", red_stop_count());
+                 }
+                 else
+                 {
+                     printf("red warning -> decelerate %s\r\n",
+                            obstacle_avoid_warning_request() ? "accepted" : "ignored");
+                 }
              }
              if (g_vs.consume_new_result(result))
              {
                  bool result_accepted = false;
-                 if (result == "武器")
+                 if (red_stop_requested())
+                 {
+                     // 锁停后的同帧分类不能重新启动绕行状态机。
+                     printf("AI result ignored: vehicle stopped\r\n");
+                 }
+                 else if (result == "武器")
                  {
                      result_accepted = obstacle_avoid_confirm(ObstacleAvoidDirection::Left);
                  }
@@ -182,8 +206,11 @@ int main(int, char **)
                      // 载具、错误等非绕行结果只取消尚在等待分类的状态 1。
                      result_accepted = obstacle_avoid_cancel_warning();
                  }
-                 printf("AI result -> obstacle FSM %s\r\n",
-                        result_accepted ? "accepted" : "ignored");
+                 if (!red_stop_requested())
+                 {
+                     printf("AI result -> obstacle FSM %s\r\n",
+                            result_accepted ? "accepted" : "ignored");
+                 }
              }
         }
         // ===== VS添加结束 =====

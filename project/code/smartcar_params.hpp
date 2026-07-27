@@ -19,7 +19,7 @@
 // inline constexpr PurePursuitSetting circle_exit_pursuit{45.0f, 30.0f};
 
 // 智能车可标定参数的唯一默认值入口；修改后需重新编译。
-// 保持分组顺序：speed -> control -> obstacle -> vision。
+// 保持分组顺序：speed -> control -> zebra -> obstacle -> vision。
 namespace smartcar::params
 {
 namespace speed
@@ -60,6 +60,28 @@ static_assert(k_vision_steer_normal_rate_per_second > 0.0f &&
               "Vision steer rate limits must be positive");
 static_assert(k_vision_steer_reversal_threshold >= 0.0f,
               "Vision steer reversal threshold must be non-negative");
+}
+
+namespace zebra
+{
+// 斑马线检测从首帧图像处理时刻起延迟开启，避开启动曝光/起步抖动。
+inline constexpr auto detect_start_delay = std::chrono::seconds{5};
+// 一次事件确认后，至少经过该时间且斑马线消失，才允许再次布防。
+inline constexpr auto detection_cooldown = std::chrono::seconds{15};
+// 当前 160x120 图像下的检测区域：从下方第100行扫到第50行。
+inline constexpr int scan_start_row = 100;
+inline constexpr int scan_end_row = 50;
+// 区域内黑白跳变总数阈值；需结合当前二值化和滤波效果实测调整。
+inline constexpr int transition_threshold = 300;
+// 连续有效帧达到该数量才确认斑马线，减少单帧纹理误检。
+inline constexpr int confirm_frames = 2;
+
+static_assert(detect_start_delay.count() >= 0 && detection_cooldown.count() >= 0,
+              "Zebra timing parameters must be non-negative");
+static_assert(scan_start_row >= scan_end_row && scan_end_row >= 0,
+              "Zebra scan rows must be ordered from bottom to top");
+static_assert(transition_threshold > 0 && confirm_frames > 0,
+              "Zebra detection thresholds must be positive");
 }
 
 namespace obstacle

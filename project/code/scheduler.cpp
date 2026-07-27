@@ -3,6 +3,7 @@
 #include "common_MYmenu.hpp"
 #include "obstacle_avoid/obstacle_avoid_fsm.hpp"
 #include "smartcar_params.hpp"
+#include "stop.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -172,6 +173,23 @@ void master_scheduler_callback()
         // 使用两次采样的真实累计时间，随后立即清零等待下一个控制周期。
         float control_dt = dt_sum_10ms;
         dt_sum_10ms = 0.0f;
+
+        if (red_stop_requested())
+        {
+            // 锁停优先于所有控制状态；持续清零，避免历史 PID/PWM 再次驱动车轮。
+            target_speed = 0.0f;
+            target_yaw = yaw;
+            pwm_l = 0.0f;
+            pwm_r = 0.0f;
+            base_start_speed = 0.0f;
+            pid_left.clear();
+            pid_right.clear();
+            pid_angle.clear();
+            last_vision_control_steer = 0.0f;
+            motor_set_speed(0, 0);
+            publish_wheel_control_telemetry(0.0f, 0.0f, 0.0f, false);
+            return;
+        }
 
         // 发车安全门优先级最高。STOP 时持续清空全部闭环状态，禁止残留积分和 PWM。、
         if (k_use_menu_start_gate && !Menu_Car_Enabled())
