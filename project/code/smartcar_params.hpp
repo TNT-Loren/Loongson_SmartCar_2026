@@ -19,17 +19,17 @@
 // inline constexpr PurePursuitSetting circle_exit_pursuit{45.0f, 30.0f};
 
 // 智能车可标定参数的唯一默认值入口；修改后需重新编译。
-// 保持分组顺序：speed -> control -> zebra -> obstacle -> vision。
+// 保持分组顺序：speed -> control -> zebra -> red_brick -> obstacle -> vision。
 namespace smartcar::params
 {
 namespace speed
 {
 // 各赛道场景的默认目标轮速。运行时会复制到可由菜单修改的变量中。
-inline constexpr float straight_target = 115.0f;
-inline constexpr float gentle_curve_target = 100.0f;
-inline constexpr float sharp_curve_target = 95.0f;
-inline constexpr float obstacle_avoid_target = 70.f;
-inline constexpr float circle_target = 100.0f;
+inline constexpr float straight_target = 125.0f;
+inline constexpr float gentle_curve_target = 110.0f;
+inline constexpr float sharp_curve_target = 105.0f;
+inline constexpr float obstacle_avoid_target = 70.0f;
+inline constexpr float circle_target = 105.0f;
 inline constexpr float lost_line_target = 110.0f ;
 
 
@@ -50,8 +50,8 @@ static_assert(acceleration_step > 0.0f && deceleration_step > 0.0f,
 namespace control
 {
 // 普通视觉修正与大幅反向换向的 steer 最大变化率，单位：steer/s。
-inline constexpr float k_vision_steer_normal_rate_per_second = 2000.0f;
-inline constexpr float k_vision_steer_reversal_rate_per_second = 2600.0f;
+inline constexpr float k_vision_steer_normal_rate_per_second = 1800.0f;
+inline constexpr float k_vision_steer_reversal_rate_per_second = 2300.0f;
 // 反向请求幅度达到该值后，才使用更快的换向变化率。
 inline constexpr float k_vision_steer_reversal_threshold = 30.0f;
 
@@ -84,6 +84,26 @@ static_assert(transition_threshold > 0 && confirm_frames > 0,
               "Zebra detection thresholds must be positive");
 }
 
+namespace red_brick
+{
+// 程序启动后延迟接受红砖控制，避开初始化和起步阶段的误识别。
+inline constexpr auto detection_start_delay = std::chrono::seconds{5};
+// 每次有效触发后，临时缩小普通巡线的 IPM 中线偏移。
+inline constexpr float active_midline_offset_px = 18.5f;
+inline constexpr auto offset_hold_duration = std::chrono::seconds{3};
+// 有效触发后进入冷却；同一红砖还必须先消失，才允许再次触发。
+inline constexpr auto trigger_cooldown = std::chrono::seconds{5};
+// 达到上限后本次程序运行期间不再接受红砖触发；设为 0 可关闭该功能。
+inline constexpr std::uint32_t max_trigger_count = 3;
+
+static_assert(detection_start_delay.count() >= 0 &&
+                  offset_hold_duration.count() > 0 &&
+                  trigger_cooldown.count() >= 0,
+              "Red-brick timing parameters are invalid");
+static_assert(active_midline_offset_px > 0.0f,
+              "Red-brick midline offset must be positive");
+}
+
 namespace obstacle
 {
 // 减速及等待分类阶段。
@@ -98,8 +118,8 @@ inline constexpr auto decelerate_timeout = std::chrono::milliseconds{2000};//减
 //状态二：
 inline constexpr float turn_target_speed = 30.0f;//转向目标速度
 // 目标是实际需要打出的状态二角度，不再用“大目标角-大容差”模拟小转角。
-inline constexpr float left_turn_relative_yaw_deg = -6.0f;//左转相对 yaw 角度
-inline constexpr float right_turn_relative_yaw_deg = 6.0f;//右转相对 yaw 角度
+inline constexpr float left_turn_relative_yaw_deg = -4.0f;//左转相对 yaw 角度
+inline constexpr float right_turn_relative_yaw_deg = 4.0f;//右转相对 yaw 角度
 inline constexpr float turn_yaw_tolerance_deg = 1.0f;//转向 yaw 容差角度
 // 保持两轮都尽量向前，避免 turn_target_speed=30 时变成单轮原地转。
 inline constexpr float turn_steer_limit = 22.0f;//转向差速限制
@@ -110,7 +130,7 @@ inline constexpr auto turn_timeout = std::chrono::milliseconds{1000};//转向超
 
 // 沿边绕行及安全超时。
 inline constexpr bool use_edge_forward_preview = true;
-inline constexpr float edge_lookahead_distance_px = 13.0f;//边线前瞻距离
+inline constexpr float edge_lookahead_distance_px = 7.0f;//边线前瞻距离
 inline constexpr float edge_midline_offset_px = -5.0f;//无
 inline constexpr auto edge_follow_duration = std::chrono::milliseconds{1000};
 inline constexpr auto reentry_cooldown = std::chrono::milliseconds{500}; // 绕行结束后再次接受请求前的冷却时间。
@@ -193,7 +213,7 @@ inline constexpr double image_to_ipm_matrix[3][3] = {
 inline constexpr float edge_resample_distance_px = 3.9f;
 inline constexpr float break_distance_px = 18.0f;
 inline constexpr int midline_tangent_span_points = 2;
-inline constexpr float default_midline_offset_px = 22.5f;
+inline constexpr float default_midline_offset_px = 22.5f;//22.5
 inline constexpr float front_anchor_x = 79.0f;
 inline constexpr float front_anchor_y = 119.0f;
 inline constexpr float front_anchor_max_gap_px = 36.0f;
@@ -218,11 +238,11 @@ struct PurePursuitSetting
 // inline constexpr PurePursuitSetting circle_entry_pursuit{44.0f, 40.0f};
 // inline constexpr PurePursuitSetting circle_inside_pursuit{44.0f, 34.0f};
 // inline constexpr PurePursuitSetting circle_exit_pursuit{44.0f, 30.0f};
-inline constexpr PurePursuitSetting straight_pursuit{60.2f-15.0f, 35.0f};
-inline constexpr PurePursuitSetting gentle_curve_pursuit{52.0 - 15.0f, 40.0f};
-inline constexpr PurePursuitSetting sharp_curve_pursuit{50.0 - 15.0f, 45.0f};
-inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0 - 15.0f, 90.0f};
-inline constexpr PurePursuitSetting lost_line_pursuit{65.0 - 15.0f, 15.0f};
+inline constexpr PurePursuitSetting straight_pursuit{60.2f-10.0f, 35.0f};
+inline constexpr PurePursuitSetting gentle_curve_pursuit{52.0 - 10.0f, 40.0f};
+inline constexpr PurePursuitSetting sharp_curve_pursuit{50.0 - 10.0f, 45.0f};
+inline constexpr PurePursuitSetting obstacle_avoid_pursuit{35.0 - 10.0f, 90.0f};
+inline constexpr PurePursuitSetting lost_line_pursuit{65.0 - 10.0f, 15.0f};
 inline constexpr PurePursuitSetting circle_entry_pursuit{50.0f, 40.0f};
 inline constexpr PurePursuitSetting circle_inside_pursuit{45.0f, 34.0f};
 inline constexpr PurePursuitSetting circle_exit_pursuit{45.0f, 30.0f};

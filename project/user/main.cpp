@@ -3,6 +3,7 @@
 #include <iostream>
 #include "scheduler.hpp" // 引入中央调度器
 #include "../code/stop.hpp"
+#include "../code/smartcar_params.hpp"
 
 // 5.2 0.12 angle
 //  提供 VSInference 类：色块检测 + NCNN推理 + 跟踪状态机 + 彩色图传输出
@@ -10,7 +11,9 @@
 #include "../code/vs_ai_stream.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <termios.h>
 #include <unistd.h>
 
@@ -26,6 +29,64 @@ float test1, test2, test3, test4;
 int key_mode = 0;
 
 bool g_vs_ready = false; // VS是否初始化成功（单摄像头时可能失败，降级跳过）
+
+namespace
+{
+namespace red_brick_param = smartcar::params::red_brick;
+namespace ipm_param = smartcar::params::vision::ipm;
+using RedBrickClock = std::chrono::steady_clock;
+
+struct RedBrickOffsetState
+{
+    bool armed = true;
+    bool offset_active = false;
+    std::uint32_t trigger_count = 0;
+    RedBrickClock::time_point hold_until = RedBrickClock::time_point::min();
+    RedBrickClock::time_point cooldown_until = RedBrickClock::time_point::min();
+};
+
+void update_red_brick_midline_offset(bool red_brick_detected,
+                                     RedBrickClock::time_point program_start_time)
+{
+    static RedBrickOffsetState state;
+    const auto now = RedBrickClock::now();
+
+    if (state.offset_active && now >= state.hold_until)
+    {
+        state.offset_active = false;
+        g_ipm_midline_offset_px.store(ipm_param::default_midline_offset_px);
+        printf("red brick -> midline offset restored to %.1f\r\n",
+               ipm_param::default_midline_offset_px);
+    }
+
+    if (!red_brick_detected)
+    {
+        // 红砖必须先离开画面才重新布防，防止同一块砖持续为真时重复计数。
+        state.armed = true;
+        return;
+    }
+
+    if (now - program_start_time < red_brick_param::detection_start_delay ||
+        !state.armed ||
+        now < state.cooldown_until ||
+        state.trigger_count >= red_brick_param::max_trigger_count)
+    {
+        return;
+    }
+
+    state.armed = false;
+    ++state.trigger_count;
+    state.offset_active = true;
+    state.hold_until = now + red_brick_param::offset_hold_duration;
+    state.cooldown_until = now + red_brick_param::trigger_cooldown;
+    g_ipm_midline_offset_px.store(red_brick_param::active_midline_offset_px);
+    printf("red brick #%u/%u -> midline offset %.1f for %lld s\r\n",
+           state.trigger_count,
+           red_brick_param::max_trigger_count,
+           red_brick_param::active_midline_offset_px,
+           static_cast<long long>(red_brick_param::offset_hold_duration.count()));
+}
+}
 
 //===================================================
 void cleanup();
@@ -68,6 +129,7 @@ const char *track_scene_name(TrackScene scene)
 
 int main(int, char **)
 {
+    const auto program_start_time = RedBrickClock::now();
     //  esc_init();
     //  esc_set_speed_percent(0);
     imu_init();
@@ -170,6 +232,8 @@ int main(int, char **)
              {
                  tcp_camera_update_vs_image();
              }
+             update_red_brick_midline_offset(g_vs.is_red_brick_detected(),
+                                             program_start_time);
              // 预警必须先于最终分类处理：先建立状态 1，同帧到达的最终结果再确认左右方向。
              if (g_vs.consume_red_warning())
              {

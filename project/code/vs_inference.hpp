@@ -5,6 +5,7 @@
 #include <vector>
 #include <map>
 #include "zf_common_headfile.hpp"
+#include "speed_strategy.hpp"
 
 // 增加置信度的运用
 // 有时候边缘线容易甩飞
@@ -20,21 +21,46 @@
 #define VS_ENABLE_GUIDELINES (0)      // VS 彩色调试图中绘制辅助线
 
 // 色块检测：先 HSV 找红色目标，再用 box 框出模型输入 ROI。
-#define VS_COLOR_DETECT_Y_MAX (120) // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算
-#define VS_HSV_SCALE (4)            // HSV降采样倍率；默认裁剪后约为80x31
-#define VS_ENABLE_RED_MASK_CLOSE (1) // 连接降采样后相邻的红色色块，避免缩放造成轮廓断裂
-#define VS_RED_CLOSE_KERNEL_SIZE_PX (12) // 闭运算核边长，单位为320x240原图px；内部自动换算
-#define VS_RED_CLOSE_ITERATIONS (1)  // 闭运算次数；过大会把原本独立的目标合并
-#define VS_BOX_SIZE (64)       // 绿色检测框大小；必须与 NCNN 输入尺寸一致
-#define VS_BOX_Y_OFFSET_PX (5) // 检测框Y偏移：正=下移，负=上移，单位px
-#define VS_AREA_MIN (16)       // 色块最小面积，单位为320x240原图px^2
-#define VS_AREA_MAX (320)      // 有效区色块最大面积，单位为320x240原图px^2
-#define VS_DIRECTION_MIN_AREA (4) // ROI方向检测的最小红色像素面积
-#define VS_DIRECTION_MIN_ASPECT_RATIO (1.10f) // 长宽比过小时不旋转
+#define VS_COLOR_DETECT_Y_MAX (120)          // 色域计算最大Y坐标（含），下方区域不参与HSV/轮廓计算
+#define VS_HSV_SCALE (4)                     // HSV降采样倍率；默认裁剪后约为80x31
+#define VS_ENABLE_RED_MASK_CLOSE (1)         // 连接降采样后相邻的红色色块，避免缩放造成轮廓断裂
+#define VS_RED_CLOSE_KERNEL_SIZE_PX (12)     // 闭运算核边长，单位为320x240原图px；内部自动换算
+#define VS_RED_CLOSE_ITERATIONS (1)          // 闭运算次数；过大会把原本独立的目标合并
+#define VS_BOX_SIZE (64)                     // 绿色检测框大小；必须与 NCNN 输入尺寸一致
+#define VS_BOX_Y_OFFSET_PX (5)               // 检测框Y偏移：正=下移，负=上移，单位px
+#define VS_AREA_MIN (40)                     // 色块最小面积，单位为320x240原图px^2
+// 面积上限随红色色块底部Y坐标增加，补偿目标靠近车辆后的透视放大。
+// 以下控制点按目标靶样本的“偏大上界”压缩，控制点之间使用线性插值，
+// 避免分段边界处面积上限突然增大而放入红砖。
+// VS_AREA_MAX 是动态上限的全局封顶，不再作为所有Y位置共用的单一分类阈值。
+#define VS_AREA_MAX (580)                    // 动态面积上限封顶，单位为320x240原图px^2
+#define VS_AREA_BREAK_Y1 (40)                // 第1段结束Y
+#define VS_AREA_BREAK_Y2 (60)                // 第2段结束Y
+#define VS_AREA_BREAK_Y3 (70)                // 第3段结束Y
+#define VS_AREA_BREAK_Y4 (80)                // 第4段结束Y
+#define VS_AREA_MAX_Y1 (90)                  // by=Y1 控制点（目标偏大值约90）
+#define VS_AREA_MAX_Y2 (170)                 // by=Y2 控制点（目标偏大值约170）
+#define VS_AREA_MAX_Y3 (270)                 // by=Y3 控制点（覆盖67~74行目标）
+#define VS_AREA_MAX_Y4 (350)                 // by=Y4 控制点（目标偏大值约350）
+#define VS_AREA_MAX_Y5 (580)                 // by=FINALIZE_Y控制点；压低原600偏大估计
+#define VS_RED_BRICK_CONFIRM_FRAMES (5)       // 连续多少帧超过动态面积上限后确认红砖
+#define VS_DIRECTION_MIN_AREA (4)            // ROI方向检测的最小红色像素面积
+#define VS_DIRECTION_MIN_ASPECT_RATIO (1.10f)// 长宽比过小时不旋转
 
 // VS 左右边线 X 限制调参区：越界后强制锁定到对应边界。
-#define VS_TRACK_EDGE_X_MIN (20)
-#define VS_TRACK_EDGE_X_MAX (300)
+// 直道使用更窄范围；普通/弯道范围见 *_DEFAULT 宏。
+#define VS_TRACK_EDGE_X_MIN (80)
+#define VS_TRACK_EDGE_X_MAX (240)
+#define VS_TRACK_EDGE_X_MIN_DEFAULT (10)
+#define VS_TRACK_EDGE_X_MAX_DEFAULT (310)
+#if VS_TRACK_EDGE_X_MIN < 0 || VS_TRACK_EDGE_X_MIN >= VS_TRACK_EDGE_X_MAX || \
+    VS_TRACK_EDGE_X_MAX >= UVC_WIDTH || VS_TRACK_EDGE_X_MIN_DEFAULT < 0 || \
+    VS_TRACK_EDGE_X_MIN_DEFAULT >= VS_TRACK_EDGE_X_MAX_DEFAULT || \
+    VS_TRACK_EDGE_X_MAX_DEFAULT >= UVC_WIDTH || \
+    VS_TRACK_EDGE_X_MIN < VS_TRACK_EDGE_X_MIN_DEFAULT || \
+    VS_TRACK_EDGE_X_MAX > VS_TRACK_EDGE_X_MAX_DEFAULT
+#error "VS track edge X limits must be within the camera frame"
+#endif
 
 // 起投与 LUT 区域：目标先在该范围内建立跟踪，越过 BY_MAX 后继续跟踪到结算线。
 #define VS_CX_LIMIT_BOTH (0)       // 同时启用巡线左右边线限制
@@ -45,9 +71,15 @@
 #error "VS_CX_LIMIT_MODE must be 0, 1 or 2"
 #endif
 // X 限制不再使用固定值，而是逐行读取巡线模块输出的左右边线。
-#define VS_BY_MIN (50)      // 底部中心Y下限；也是权重LUT归一化起点
-#define VS_BY_MAX (80)     // LUT归一化终点；超过后继续使用最大权重
-#define VS_FINALIZE_Y (90) // 提前结算线
+#define VS_BY_MIN (50)      // 红色预警线；也是有效区和权重LUT的起点
+#define VS_BY_MAX (80)      // 黄色普通结算线；超过后继续使用最大权重
+#define VS_FINALIZE_Y (90)  // 紫色强制结算线
+
+// 按 speed_strategy 发布的赛道场景动态调整识别 Y 范围。
+// 直道减小红色预警线 BY_MIN；急弯同步增大黄色 BY_MAX 和紫色 FINALIZE_Y。
+// 急弯两条结算线共用同一偏移，间距保持不变；偏移量设为0可关闭对应调整。
+#define VS_STRAIGHT_BY_MIN_OFFSET (-10)
+#define VS_SHARP_CURVE_SETTLEMENT_Y_OFFSET (25)
 
 // HSV 红色双区间阈值：OpenCV HSV中红色跨 0/179，需要两段合并。
 #define VS_HSV1_LOW 0, 150, 100
@@ -59,6 +91,13 @@
 #define VS_LOST_FRAMES (2)           // 连续丢失多少帧后确认目标离开
 #define VS_MIN_TRACK (2)             // 至少跟踪多少帧才认为结果有效
 #define VS_RESULT_COOLDOWN_MS (500) // 两次最终结果输出之间的冷却时间，单位ms
+#define VS_WARNING_TIMEOUT_MS (1000) // 红色预警后未结算的超时时间
+
+#define VS_WARNING_TIMEOUT_OUTPUT_VEHICLE (0) // 预警超时后是否输出载具：0=不输出，1=输出
+
+#if VS_WARNING_TIMEOUT_OUTPUT_VEHICLE != 0 && VS_WARNING_TIMEOUT_OUTPUT_VEHICLE != 1
+#error "VS_WARNING_TIMEOUT_OUTPUT_VEHICLE must be 0 or 1"
+#endif
 #define VS_EXP_ALPHA (2.5f)          // Y方向指数权重；越大越偏向近处目标
 #define VS_CONFIDENCE_WEIGHT_STRENGTH (0.25f) // 满置信度相对Y权重最多增加25%
 
@@ -105,12 +144,25 @@ struct VSConfig
     int box_y_offset = VS_BOX_Y_OFFSET_PX;
     int area_min = VS_AREA_MIN;
     int area_max = VS_AREA_MAX;
+    int area_break_y1 = VS_AREA_BREAK_Y1;
+    int area_break_y2 = VS_AREA_BREAK_Y2;
+    int area_break_y3 = VS_AREA_BREAK_Y3;
+    int area_break_y4 = VS_AREA_BREAK_Y4;
+    int area_max_y1 = VS_AREA_MAX_Y1;
+    int area_max_y2 = VS_AREA_MAX_Y2;
+    int area_max_y3 = VS_AREA_MAX_Y3;
+    int area_max_y4 = VS_AREA_MAX_Y4;
+    int area_max_y5 = VS_AREA_MAX_Y5;
+    int red_brick_confirm_frames = VS_RED_BRICK_CONFIRM_FRAMES;
     int direction_min_area = VS_DIRECTION_MIN_AREA;
     float direction_min_aspect_ratio = VS_DIRECTION_MIN_ASPECT_RATIO;
 
     int by_min = VS_BY_MIN;
     int by_max = VS_BY_MAX;
     int finalize_y = VS_FINALIZE_Y;
+    // 场景 Y 调整偏移：可在 init() 前直接修改，单位为原图像素。
+    int straight_by_min_offset = VS_STRAIGHT_BY_MIN_OFFSET;
+    int sharp_curve_settlement_y_offset = VS_SHARP_CURVE_SETTLEMENT_Y_OFFSET;
 
     cv::Scalar hsv1_low{VS_HSV1_LOW};
     cv::Scalar hsv1_high{VS_HSV1_HIGH};
@@ -120,6 +172,7 @@ struct VSConfig
     int lost_frames = VS_LOST_FRAMES;
     int min_track = VS_MIN_TRACK;
     int result_cooldown_ms = VS_RESULT_COOLDOWN_MS;
+    int warning_timeout_ms = VS_WARNING_TIMEOUT_MS;
     float exp_alpha = VS_EXP_ALPHA;
     float confidence_weight_strength = VS_CONFIDENCE_WEIGHT_STRENGTH;
 
@@ -185,6 +238,7 @@ public:
     bool consume_new_result(std::string &result); // 读取、打印并清除一次最终结果
     bool has_red_warning() const;                 // 首个有效 ROI 是否产生了预警事件
     bool consume_red_warning();                   // 读取并清除一次预警事件
+    bool is_red_brick_detected() const;            // 是否已连续多帧确认面积过大的红砖
     std::string get_label() const;                // 原始推理标签，如 "急救包" / "救护车" / "枪械"
     std::string get_result() const;               // 分类结果，如 "物资" / "载具" / "武器"
     std::string get_category() const;             // 分类结果（同 get_result）
@@ -256,6 +310,10 @@ private:
     // ===== 指数权重 LUT（启动时预计算，运行时 O(1) 查表） =====
     float weight_lut[200];
     int lut_ofs = 0, lut_size = 0;
+    int active_by_min = VS_BY_MIN; // 当前场景实际使用的上方起始线
+    int active_by_max = VS_BY_MAX; // 当前场景实际使用的下方结束线
+    int active_finalize_y = VS_FINALIZE_Y; // 当前场景实际使用的强制结算线
+    TrackScene current_track_scene = TrackScene::Straight; // 本帧 speed_strategy 场景快照
 
     // ===== 跟踪状态机 =====
     enum
@@ -280,21 +338,34 @@ private:
     long long final_lost_ms = 0;
     int fps_count = 0;
     std::atomic<bool> red_warning{false};
+    std::atomic<bool> red_brick_detected{false}; // 控制线程只读；由视觉线程按连续帧更新
+    int red_brick_frame_count = 0;               // 仅视觉线程写入，无需原子化
     std::atomic<int> cx_limit_mode{VS_CX_LIMIT_MODE};
     int track_left_limit[UVC_HEIGHT] = {};  // 巡线左边线映射到 VS 有效检测区的逐行限制
     int track_right_limit[UVC_HEIGHT] = {}; // 巡线右边线映射到 VS 有效检测区的逐行限制
     bool track_left_valid[UVC_HEIGHT] = {};  // 对应行是否有可用于限幅的左边线
     bool track_right_valid[UVC_HEIGHT] = {}; // 对应行是否有可用于限幅的右边线
     bool warning_armed = true; // 首次有效 ROI 后锁定，仅在成功输出投票结果后重新布防
+    bool scene_y_locked = false; // 预警目标未消失时锁定实际 Y 范围，避免场景切换造成阈值跳变
+    int scene_y_lost_cnt = 0;    // 连续无有效目标帧数，达到 lost_frames 后解除场景 Y 锁
+    bool warning_timeout_active = false; // 已预警但尚未产生正式结算结果
+    std::chrono::steady_clock::time_point warning_since;
     std::chrono::steady_clock::time_point last_result_time = std::chrono::steady_clock::time_point::min();
 
     // ===== 内部方法 =====
     void process_frame(cv::Mat &src);
+    void update_scene_y_params();
+    void update_scene_y_lock(bool has_target);
+    void check_warning_timeout();
+    void rebuild_weight_lut();
+    int area_max_for_y(int by) const;
+    void update_red_brick_state(bool detected_this_frame);
     void output_final(bool immediate = false);
     void draw_guidelines(cv::Mat &src);
     void bgr_to_rgb565(cv::Mat &src);
     bool build_red_tuning_debug_image();
     void update_track_edge_limits();
+    void apply_scene_track_edge_limits();
     bool track_edge_pair_is_valid(int y) const;
     bool cx_is_valid(int cx, int bottom_y, int mode) const;
 

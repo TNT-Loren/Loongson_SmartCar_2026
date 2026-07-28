@@ -2,19 +2,45 @@
 #include "vs_ai_stream.hpp"
 #include "image_test.hpp"
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <iostream>
+#include <mutex>
 
 VSInference g_vs;
 
-static_assert(VS_TRACK_EDGE_X_MIN >= 0 &&
+static_assert(VS_TRACK_EDGE_X_MIN_DEFAULT >= 0 &&
+                  VS_TRACK_EDGE_X_MIN_DEFAULT < VS_TRACK_EDGE_X_MAX_DEFAULT &&
+                  VS_TRACK_EDGE_X_MAX_DEFAULT < UVC_WIDTH &&
+                  VS_TRACK_EDGE_X_MIN >= 0 &&
                   VS_TRACK_EDGE_X_MIN < VS_TRACK_EDGE_X_MAX &&
                   VS_TRACK_EDGE_X_MAX < UVC_WIDTH,
               "VS track edge X limits must be within the camera frame");
 
 namespace
 {
+const char *track_scene_debug_name(TrackScene scene)
+{
+    switch (scene)
+    {
+    case TrackScene::Straight:
+        return "STRAIGHT";
+    case TrackScene::GentleCurve:
+        return "GENTLE";
+    case TrackScene::SharpCurve:
+        return "SHARP";
+    case TrackScene::ObstacleAvoid:
+        return "OBSTACLE";
+    case TrackScene::Circle:
+        return "CIRCLE";
+    case TrackScene::LostLine:
+        return "LOST";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 // 找到 ROI 中最大的红色连通域，并用 minAreaRect 估计其长边方向。
 // 长边是无方向直线，角度归一化到 [-90, 90)，可直接用于仿射旋转。
 bool largest_red_component_angle(const cv::Mat &red_mask,
@@ -161,6 +187,17 @@ static inline void h_line(cv::Mat &img, int y, const cv::Scalar &c)
     bres_line(img, 0, y, img.cols - 1, y, c);
 }
 
+// 场景动态阈值使用虚线，重合时仍能看见下层的原始阈值线或结算线。
+static inline void dashed_h_line(cv::Mat &img, int y, const cv::Scalar &c)
+{
+    constexpr int segment = 6;
+    constexpr int gap = 4;
+    for (int x = 0; x < img.cols; x += segment + gap)
+    {
+        bres_line(img, x, y, std::min(x + segment - 1, img.cols - 1), y, c);
+    }
+}
+
 // ===================================================================
 // classify_label — 标签到分类的映射（唯一维护点）
 // ===================================================================
@@ -185,7 +222,12 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     labels = _labels;
     initialized = false;
     red_warning.store(false, std::memory_order_relaxed);
+    red_brick_detected.store(false, std::memory_order_relaxed);
+    red_brick_frame_count = 0;
     warning_armed = true;
+    scene_y_locked = false;
+    scene_y_lost_cnt = 0;
+    warning_timeout_active = false;
 
     if (cfg.color_detect_y_max < 0 || cfg.color_detect_y_max >= UVC_HEIGHT ||
         cfg.finalize_y > cfg.color_detect_y_max)
@@ -205,6 +247,18 @@ bool VSInference::init(const std::vector<std::string> &_labels,
     {
         printf("VS confidence weight strength must be within [0,1], current=%.3f\r\n",
                cfg.confidence_weight_strength);
+        return false;
+    }
+    if (cfg.warning_timeout_ms <= 0)
+    {
+        printf("VS warning timeout must be positive, current=%d ms\r\n",
+               cfg.warning_timeout_ms);
+        return false;
+    }
+    if (cfg.red_brick_confirm_frames <= 0)
+    {
+        printf("VS red brick confirm frames must be positive, current=%d\r\n",
+               cfg.red_brick_confirm_frames);
         return false;
     }
 #if VS_ENABLE_RED_MASK_CLOSE
@@ -320,18 +374,10 @@ bool VSInference::init(const std::vector<std::string> &_labels,
 #endif
 
     // ---- 4. 预计算 Y 方向指数权重 LUT ----
-    lut_ofs = cfg.by_min;
-    lut_size = cfg.by_max - cfg.by_min;
-    for (int y = 0; y <= lut_size; y++)
-    {
-        int by = y + lut_ofs;
-        float yn = (float)(by - cfg.by_min) / (cfg.by_max - cfg.by_min);
-        if (yn < 0)
-            yn = 0;
-        if (yn > 1)
-            yn = 1;
-        weight_lut[y] = expf(cfg.exp_alpha * yn);
-    }
+    active_by_min = cfg.by_min;
+    active_by_max = cfg.by_max;
+    active_finalize_y = cfg.finalize_y;
+    rebuild_weight_lut();
 #if VS_ENABLE_TERMINAL_OUTPUT
     printf("权重LUT初始化完成 (%d entries)\n", lut_size + 1);
 #endif
@@ -353,15 +399,28 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
     cfg.box_y_offset = VS_BOX_Y_OFFSET_PX;
     cfg.area_min = VS_AREA_MIN;
     cfg.area_max = VS_AREA_MAX;
+    cfg.area_break_y1 = VS_AREA_BREAK_Y1;
+    cfg.area_break_y2 = VS_AREA_BREAK_Y2;
+    cfg.area_break_y3 = VS_AREA_BREAK_Y3;
+    cfg.area_break_y4 = VS_AREA_BREAK_Y4;
+    cfg.area_max_y1 = VS_AREA_MAX_Y1;
+    cfg.area_max_y2 = VS_AREA_MAX_Y2;
+    cfg.area_max_y3 = VS_AREA_MAX_Y3;
+    cfg.area_max_y4 = VS_AREA_MAX_Y4;
+    cfg.area_max_y5 = VS_AREA_MAX_Y5;
+    cfg.red_brick_confirm_frames = VS_RED_BRICK_CONFIRM_FRAMES;
     cfg.direction_min_area = VS_DIRECTION_MIN_AREA;
     cfg.direction_min_aspect_ratio = VS_DIRECTION_MIN_ASPECT_RATIO;
     cfg.hsv_scale = VS_HSV_SCALE;
     cfg.by_min = VS_BY_MIN;
     cfg.by_max = VS_BY_MAX;
     cfg.finalize_y = VS_FINALIZE_Y;
+    cfg.straight_by_min_offset = VS_STRAIGHT_BY_MIN_OFFSET;
+    cfg.sharp_curve_settlement_y_offset = VS_SHARP_CURVE_SETTLEMENT_Y_OFFSET;
     cfg.lost_frames = VS_LOST_FRAMES;
     cfg.min_track = VS_MIN_TRACK;
     cfg.result_cooldown_ms = VS_RESULT_COOLDOWN_MS;
+    cfg.warning_timeout_ms = VS_WARNING_TIMEOUT_MS;
     cfg.exp_alpha = VS_EXP_ALPHA;
     cfg.confidence_weight_strength = VS_CONFIDENCE_WEIGHT_STRENGTH;
 
@@ -381,6 +440,193 @@ bool VSInference::init_smartcar_defaults(void *ext_uvc)
 void VSInference::set_external_camera(void *ext_uvc)
 {
     ext_uvc_dev = ext_uvc;
+}
+
+// 根据 speed_strategy 当前发布的场景选择 VS 的有效 Y 范围。
+// cfg.by_min/by_max 保留基础调参值，场景偏移只作用于实际识别范围。
+void VSInference::update_scene_y_params()
+{
+    TrackScene scene;
+    {
+        std::lock_guard<std::mutex> lock(g_vision_result_mutex);
+        scene = g_track_info.scene;
+    }
+    current_track_scene = scene;
+
+    if (scene_y_locked)
+    {
+        return;
+    }
+
+    int scene_by_min = cfg.by_min;
+    int scene_by_max = cfg.by_max;
+    int scene_finalize_y = cfg.finalize_y;
+    if (scene == TrackScene::Straight)
+    {
+        scene_by_min += cfg.straight_by_min_offset;
+    }
+    else if (scene == TrackScene::SharpCurve)
+    {
+        const int min_offset = cfg.by_min + 1 - cfg.by_max;
+        const int max_offset = cfg.color_detect_y_max - cfg.finalize_y;
+        const int settlement_offset = std::clamp(
+            cfg.sharp_curve_settlement_y_offset, min_offset, max_offset);
+        scene_by_max += settlement_offset;
+        scene_finalize_y += settlement_offset;
+    }
+
+    scene_by_min = std::clamp(scene_by_min, 0, scene_by_max - 1);
+    if (scene_by_min == active_by_min &&
+        scene_by_max == active_by_max &&
+        scene_finalize_y == active_finalize_y)
+    {
+        return;
+    }
+
+    active_by_min = scene_by_min;
+    active_by_max = scene_by_max;
+    active_finalize_y = scene_finalize_y;
+    rebuild_weight_lut();
+}
+
+// 预警触发后，即使 TrackScene 改变也继续使用触发帧的 Y 范围。
+// 连续多帧没有有效目标才认为本轮预警消失，避免短暂漏检导致阈值来回切换。
+void VSInference::update_scene_y_lock(bool has_target)
+{
+    if (!scene_y_locked)
+    {
+        return;
+    }
+
+    if (has_target)
+    {
+        scene_y_lost_cnt = 0;
+        return;
+    }
+
+    ++scene_y_lost_cnt;
+    if (scene_y_lost_cnt < std::max(1, cfg.lost_frames))
+    {
+        return;
+    }
+
+    scene_y_locked = false;
+    scene_y_lost_cnt = 0;
+    update_scene_y_params();
+#if VS_ENABLE_TERMINAL_OUTPUT
+    printf("[SCENE Y] warning cleared, range=[%d,%d], finalize=%d\r\n",
+           active_by_min, active_by_max, active_finalize_y);
+#endif
+}
+
+// 红色预警后长时间没有正式结算时，根据宏开关决定是否将本轮目标按“载具”输出到终端。
+// 即使开启也不设置 result_ready，避免 main.cpp 将这个兜底结果传入绕行控制状态机。
+void VSInference::check_warning_timeout()
+{
+    if (!warning_timeout_active)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const long long elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - warning_since)
+            .count();
+    if (elapsed_ms < cfg.warning_timeout_ms)
+    {
+        return;
+    }
+
+    warning_timeout_active = false;
+    red_warning.store(false, std::memory_order_release);
+    warning_armed = true;
+
+    // 超时代表本轮预警结束。立即允许最新 TrackScene 刷新 Y 阈值，
+    // WAIT_CLEAR 会继续挡住画面中尚未离开的同一个红色目标。
+    scene_y_locked = false;
+    scene_y_lost_cnt = 0;
+    update_scene_y_params();
+
+    state = WAIT_CLEAR;
+    lost_cnt = 0;
+    track_cnt = 0;
+    votes.clear();
+    best_w = 0;
+    best_label = "";
+
+#if VS_WARNING_TIMEOUT_OUTPUT_VEHICLE
+    printf("Final Result: 载具\r\n");
+#endif
+    printf("红色预警超时: %lld ms\r\n", elapsed_ms);
+}
+
+// 场景切换后重新计算 Y 权重，保证 LUT 归一化起点与有效识别范围一致。
+void VSInference::rebuild_weight_lut()
+{
+    lut_ofs = active_by_min;
+    lut_size = active_by_max - active_by_min;
+    for (int y = 0; y <= lut_size; ++y)
+    {
+        const int by = y + lut_ofs;
+        float yn = static_cast<float>(by - active_by_min) /
+                   static_cast<float>(active_by_max - active_by_min);
+        yn = std::clamp(yn, 0.0f, 1.0f);
+        weight_lut[y] = expf(cfg.exp_alpha * yn);
+    }
+}
+
+// 面积上限按色块包围框底部Y连续递增。
+// 线性插值消除分段跳变；控制点贴近目标靶偏大上界，优先过滤红砖。
+// 返回值同时受 cfg.area_max 封顶，保留运行时调参入口。
+int VSInference::area_max_for_y(int by) const
+{
+    const auto interpolate = [by](int y0, int area0, int y1, int area1)
+    {
+        const int span = std::max(1, y1 - y0);
+        const int offset = std::clamp(by - y0, 0, span);
+        return area0 + static_cast<int>(
+                           static_cast<long long>(area1 - area0) * offset / span);
+    };
+
+    int threshold;
+    if (by <= cfg.area_break_y1)
+        threshold = cfg.area_max_y1;
+    else if (by <= cfg.area_break_y2)
+        threshold = interpolate(cfg.area_break_y1, cfg.area_max_y1,
+                                cfg.area_break_y2, cfg.area_max_y2);
+    else if (by <= cfg.area_break_y3)
+        threshold = interpolate(cfg.area_break_y2, cfg.area_max_y2,
+                                cfg.area_break_y3, cfg.area_max_y3);
+    else if (by <= cfg.area_break_y4)
+        threshold = interpolate(cfg.area_break_y3, cfg.area_max_y3,
+                                cfg.area_break_y4, cfg.area_max_y4);
+    else
+    {
+        const int final_y = std::max(cfg.area_break_y4 + 1, cfg.finalize_y);
+        threshold = interpolate(cfg.area_break_y4, cfg.area_max_y4,
+                                final_y, cfg.area_max_y5);
+    }
+
+    return std::min(cfg.area_max, threshold);
+}
+
+// 红砖状态是一个稳定电平：连续命中指定帧数后置位，任一未命中帧立即复位。
+// “命中”只代表红色面积超过目标靶动态上限，不会让红砖进入ROI或NCNN分类。
+void VSInference::update_red_brick_state(bool detected_this_frame)
+{
+    if (!detected_this_frame)
+    {
+        red_brick_frame_count = 0;
+        red_brick_detected.store(false, std::memory_order_release);
+        return;
+    }
+
+    if (red_brick_frame_count < cfg.red_brick_confirm_frames)
+        ++red_brick_frame_count;
+
+    if (red_brick_frame_count >= cfg.red_brick_confirm_frames)
+        red_brick_detected.store(true, std::memory_order_release);
 }
 
 bool VSInference::set_cx_limit_mode(int mode)
@@ -444,6 +690,40 @@ void fill_track_edge_gaps(int *limits, bool *valid, int count)
         valid[y] = true;
     }
 }
+
+// 沿Y方向做居中七点平均；端点重复取值，临时数组避免原地滤波产生方向偏差。
+void smooth_track_edge_7(int *limits, const bool *valid, int count)
+{
+    if (count <= 0)
+        return;
+
+    bool has_valid_edge = false;
+    for (int y = 0; y < count; ++y)
+    {
+        if (valid[y])
+        {
+            has_valid_edge = true;
+            break;
+        }
+    }
+    if (!has_valid_edge)
+        return;
+
+    int filtered[UVC_HEIGHT] = {};
+    for (int y = 0; y < count; ++y)
+    {
+        int sum = 0;
+        for (int offset = -3; offset <= 3; ++offset)
+        {
+            const int sample_y = std::clamp(y + offset, 0, count - 1);
+            sum += limits[sample_y];
+        }
+        filtered[y] = (sum + 3) / 7;
+    }
+
+    for (int y = 0; y < count; ++y)
+        limits[y] = filtered[y];
+}
 } // namespace
 
 // 将巡线模块发布的左右边线只读映射到 VS 有效检测区 Y=0..color_detect_y_max。
@@ -461,10 +741,10 @@ void VSInference::update_track_edge_limits()
 
             track_left_limit[y] = std::clamp(
                 track_left * UVC_WIDTH / image_width,
-                VS_TRACK_EDGE_X_MIN, VS_TRACK_EDGE_X_MAX);
+                VS_TRACK_EDGE_X_MIN_DEFAULT, VS_TRACK_EDGE_X_MAX_DEFAULT);
             track_right_limit[y] = std::clamp(
                 track_right * UVC_WIDTH / image_width,
-                VS_TRACK_EDGE_X_MIN, VS_TRACK_EDGE_X_MAX);
+                VS_TRACK_EDGE_X_MIN_DEFAULT, VS_TRACK_EDGE_X_MAX_DEFAULT);
 
             // 巡线以贴图像边缘的值表示丢线，不能把它当作 VS 的全幅有效区域。
             track_left_valid[y] =
@@ -476,6 +756,38 @@ void VSInference::update_track_edge_limits()
 
     fill_track_edge_gaps(track_left_limit, track_left_valid, detect_h);
     fill_track_edge_gaps(track_right_limit, track_right_valid, detect_h);
+
+    // 先补齐丢线再滤波，避免贴边的无效值污染相邻有效边线。
+    smooth_track_edge_7(track_left_limit, track_left_valid, detect_h);
+    smooth_track_edge_7(track_right_limit, track_right_valid, detect_h);
+}
+
+// 直道使用近宽远窄的对称梯形，并与滤波后的巡线边线取交集。
+// 普通/弯道继续使用 update_track_edge_limits() 中的默认范围。
+void VSInference::apply_scene_track_edge_limits()
+{
+    if (current_track_scene != TrackScene::Straight)
+        return;
+
+    constexpr int trapezoid_top_y = 40;
+    constexpr int trapezoid_bottom_y = 94;
+    constexpr int trapezoid_right_top_x = 212;
+    constexpr int trapezoid_right_bottom_x = 290;
+    constexpr int trapezoid_y_span = trapezoid_bottom_y - trapezoid_top_y;
+
+    for (int y = 0; y < detect_h; ++y)
+    {
+        const int limited_y = std::clamp(y, trapezoid_top_y, trapezoid_bottom_y);
+        const int right_limit = trapezoid_right_top_x +
+            ((limited_y - trapezoid_top_y) *
+                 (trapezoid_right_bottom_x - trapezoid_right_top_x) +
+             trapezoid_y_span / 2) /
+                trapezoid_y_span;
+        const int left_limit = UVC_WIDTH - right_limit;
+
+        track_left_limit[y] = std::max(track_left_limit[y], left_limit);
+        track_right_limit[y] = std::min(track_right_limit[y], right_limit);
+    }
 }
 
 bool VSInference::track_edge_pair_is_valid(int y) const
@@ -585,6 +897,10 @@ bool VSInference::tick_bgr(const cv::Mat &bgr)
 void VSInference::process_frame(cv::Mat &src)
 {
     update_track_edge_limits();
+    // update_track_edge_limits() 已释放图像锁，再读取控制线程发布的场景，
+    // 与控制线程的“图像锁 -> 场景结果锁”顺序保持一致。
+    update_scene_y_params();
+    apply_scene_track_edge_limits();
 
     // ---- 先裁剪 Y=0..color_detect_y_max，再降采样；下半幅不进入色域计算 ----
     cv::Mat detect_source = src(cv::Rect(0, 0, UVC_WIDTH, detect_h));
@@ -658,6 +974,7 @@ void VSInference::process_frame(cv::Mat &src)
 #endif
 
     int half = cfg.box_size / 2;
+    bool red_brick_this_frame = false;
     const int current_cx_limit_mode =
         cx_limit_mode.load(std::memory_order_relaxed);
 
@@ -685,9 +1002,12 @@ void VSInference::process_frame(cv::Mat &src)
         if (area < cfg.area_min)
             continue;
 
-        // 所有正式检测区域统一使用同一个面积上限。
-        if (area > cfg.area_max)
+        // 超过目标靶动态面积上限的红块不进入ROI；只参与连续帧红砖确认。
+        if (area > area_max_for_y(by))
+        {
+            red_brick_this_frame = true;
             continue;
+        }
 
         cv::Point tl(cx - half, by - cfg.box_size + 1 + cfg.box_y_offset);
         cv::Point br(cx + half - 1, by + cfg.box_y_offset);
@@ -696,9 +1016,9 @@ void VSInference::process_frame(cv::Mat &src)
         // IDLE/LOST 状态仍必须先在正常有效区内建立或恢复跟踪。
         const bool extending_track = (state == TRACKING || state == WAIT_CLEAR);
         const int y_max = extending_track
-                              ? std::min(UVC_HEIGHT - 1, cfg.finalize_y + cfg.hsv_scale)
-                              : cfg.by_max;
-        bool yok = (by >= cfg.by_min && by <= y_max);
+                              ? std::min(UVC_HEIGHT - 1, active_finalize_y + cfg.hsv_scale)
+                              : active_by_max;
+        bool yok = (by >= active_by_min && by <= y_max);
         if (!yok)
             continue;
 
@@ -715,11 +1035,17 @@ void VSInference::process_frame(cv::Mat &src)
         }
     }
 
+    // 每帧只累计一次；同一帧出现多个超限连通域也仍按一帧计算。
+    update_red_brick_state(red_brick_this_frame);
+
 #if VS_ENABLE_TERMINAL_OUTPUT
     if (has_best)
         printf("[AREA] %d px^2 center=(%d,%d) state=%d\r\n",
                best_area, best_cx, best_by, static_cast<int>(state));
 #endif
+
+    update_scene_y_lock(has_best);
+    check_warning_timeout();
 
     // 提前结算后只锁定刚识别的同一目标。新目标紧跟着进入时，
     // 不能因为“画面仍有红块”而被 WAIT_CLEAR 整段吞掉。
@@ -766,12 +1092,12 @@ void VSInference::process_frame(cv::Mat &src)
     if (state == TRACKING)
     {
         int m = cfg.hsv_scale; // 量化容差 (hsv_scale=4 → ±4px)
-        in_zone = (has_best && obj_by >= cfg.by_min - m &&
-                   obj_by <= cfg.finalize_y + m);
+        in_zone = (has_best && obj_by >= active_by_min - m &&
+                   obj_by <= active_finalize_y + m);
     }
     else
     {
-        in_zone = (has_best && obj_by >= cfg.by_min && obj_by <= cfg.by_max);
+        in_zone = (has_best && obj_by >= active_by_min && obj_by <= active_by_max);
     }
 
     if (in_zone)
@@ -846,6 +1172,10 @@ void VSInference::process_frame(cv::Mat &src)
         if (roi_valid && warning_armed)
         {
             warning_armed = false;
+            scene_y_locked = true;
+            scene_y_lost_cnt = 0;
+            warning_timeout_active = true;
+            warning_since = std::chrono::steady_clock::now();
             red_warning.store(true, std::memory_order_release);
 #if VS_AI_STREAM_FEATURE_ENABLE && VS_AI_STREAM_MODE == 1
             // 发布触发本次预警的 320x240 原始全景帧；不裁剪、不缩放。
@@ -858,8 +1188,8 @@ void VSInference::process_frame(cv::Mat &src)
             }
 #endif
 #if VS_ENABLE_TERMINAL_OUTPUT
-            printf("[WARNING] first valid ROI center=(%d,%d)\r\n",
-                   best_cx, obj_by);
+            printf("[WARNING] first valid ROI center=(%d,%d), lock Y=[%d,%d], finalize=%d\r\n",
+                   best_cx, obj_by, active_by_min, active_by_max, active_finalize_y);
 #endif
         }
 
@@ -931,11 +1261,11 @@ void VSInference::process_frame(cv::Mat &src)
 
             // 投票从进入有效区时就开始累计；到达结算线后立即使用现有票数输出，
             // 不再等待红色目标完全离开，也不再执行后续帧推理。
-            if (obj_by >= cfg.finalize_y && track_cnt >= cfg.min_track)
+            if (obj_by >= active_finalize_y && track_cnt >= cfg.min_track)
             {
 #if VS_ENABLE_TERMINAL_OUTPUT
                 printf("[FINALIZE] target reached y=%d (line=%d)\r\n",
-                       obj_by, cfg.finalize_y);
+                       obj_by, active_finalize_y);
 #endif
                 output_final(true);
                 state = WAIT_CLEAR;
@@ -1094,8 +1424,8 @@ bool VSInference::build_red_tuning_debug_image()
     const int scale = std::max(1, cfg.hsv_scale);
     const bool extending_track = (state == TRACKING || state == WAIT_CLEAR);
     const int normal_y_max = extending_track
-                                 ? std::min(UVC_HEIGHT - 1, cfg.finalize_y + scale)
-                                 : cfg.by_max;
+                                 ? std::min(UVC_HEIGHT - 1, active_finalize_y + scale)
+                                 : active_by_max;
     const int current_cx_limit_mode =
         cx_limit_mode.load(std::memory_order_relaxed);
 
@@ -1116,9 +1446,9 @@ bool VSInference::build_red_tuning_debug_image()
 
         const int area = red_component_areas[i];
 
-        const int normal_area_max = cfg.area_max;
+        const int normal_area_max = area_max_for_y(by);
         const bool normal_valid =
-            by >= cfg.by_min && by <= normal_y_max &&
+            by >= active_by_min && by <= normal_y_max &&
             area >= cfg.area_min && area <= normal_area_max;
 
         if (normal_valid)
@@ -1178,6 +1508,9 @@ const char *VSInference::get_color_debug_view_name() const
 // ===================================================================
 void VSInference::output_final(bool immediate)
 {
+    // 进入结算即结束本轮预警超时监控；冷却期丢弃也不能再输出超时兜底结果。
+    warning_timeout_active = false;
+
     const auto now = std::chrono::steady_clock::now();
     if (last_result_time != std::chrono::steady_clock::time_point::min())
     {
@@ -1237,9 +1570,21 @@ void VSInference::output_final(bool immediate)
 // ===================================================================
 void VSInference::draw_guidelines(cv::Mat &src)
 {
-    h_line(src, cfg.by_min, cv::Scalar(0, 0, 255));      // 红色: 有效 ROI 区 Y 下界
-    h_line(src, cfg.by_max, cv::Scalar(0, 255, 255));     // 黄色: 有效区 Y 上界
-    h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 提前结算线
+    h_line(src, cfg.by_min, cv::Scalar(0, 0, 255));      // 红色: 原始上方起始线 BY_MIN
+    h_line(src, cfg.by_max, cv::Scalar(0, 255, 255));     // 黄色: 原始下方结束线 BY_MAX
+    h_line(src, cfg.finalize_y, cv::Scalar(255, 0, 255)); // 紫红色: 原始强制结算线
+    if (active_by_min != cfg.by_min)
+    {
+        dashed_h_line(src, active_by_min, cv::Scalar(0, 0, 255)); // 红色虚线: 直道实际预警线
+    }
+    if (active_by_max != cfg.by_max)
+    {
+        dashed_h_line(src, active_by_max, cv::Scalar(0, 255, 255)); // 黄色虚线: 急弯实际结算线
+    }
+    if (active_finalize_y != cfg.finalize_y)
+    {
+        dashed_h_line(src, active_finalize_y, cv::Scalar(255, 0, 255)); // 紫色虚线: 急弯强制结算线
+    }
     const int mode = cx_limit_mode.load(std::memory_order_relaxed);
     const int edge_rows = std::min(src.rows, detect_h);
     if (mode == VS_CX_LIMIT_BOTH)
@@ -1282,6 +1627,18 @@ void VSInference::draw_guidelines(cv::Mat &src)
                       cv::Scalar(0, 255, 255));
         }
     }
+
+    char scene_text[64] = {0};
+    std::snprintf(scene_text, sizeof(scene_text),
+                  "SCENE:%s Y:%d/%d/%d",
+                  track_scene_debug_name(current_track_scene),
+                  active_by_min, active_by_max, active_finalize_y);
+    cv::putText(src, scene_text, cv::Point(4, 14),
+                cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+    cv::putText(src, scene_text, cv::Point(4, 14),
+                cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
 }
 
 // ===================================================================
@@ -1310,6 +1667,10 @@ bool VSInference::has_new_result() const { return result_ready; }
 bool VSInference::has_red_warning() const
 {
     return red_warning.load(std::memory_order_acquire);
+}
+bool VSInference::is_red_brick_detected() const
+{
+    return red_brick_detected.load(std::memory_order_acquire);
 }
 bool VSInference::consume_red_warning()
 {
