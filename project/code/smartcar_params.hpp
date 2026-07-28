@@ -132,7 +132,7 @@ inline constexpr auto turn_timeout = std::chrono::milliseconds{1000};//转向超
 inline constexpr bool use_edge_forward_preview = true;
 inline constexpr float edge_lookahead_distance_px = 7.0f;//边线前瞻距离
 inline constexpr float edge_midline_offset_px = -5.0f;//无
-inline constexpr auto edge_follow_duration = std::chrono::milliseconds{1000};
+inline constexpr auto edge_follow_duration = std::chrono::milliseconds{1500};
 inline constexpr auto reentry_cooldown = std::chrono::milliseconds{500}; // 绕行结束后再次接受请求前的冷却时间。
 inline constexpr auto total_timeout = std::chrono::milliseconds{3000};
 

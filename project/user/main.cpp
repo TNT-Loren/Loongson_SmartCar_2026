@@ -238,7 +238,7 @@ int main(int, char **)
              if (g_vs.consume_red_warning())
              {
                  // -1=关闭；改为 red_stop(N) 即第 N 个色块预警时停车。
-                 if (red_stop(6))
+                 if (red_stop(3))
                  {
                      // 本次预警只触发锁停，不再启动绕行状态一。
                      printf("red warning #%u -> vehicle stop\r\n", red_stop_count());
